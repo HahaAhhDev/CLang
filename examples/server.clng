@@ -1,0 +1,18 @@
+var:port = 8471
+
+fn::h(r) {
+  if(r.path == "/hi") {
+    return("hello back")
+  } else {
+    var:out = f"got {r.method} {r.path}"
+    return(out)
+  }
+}
+
+fn::boot() {
+  emit(f"serving on {port} for 2 hits")
+  http_serve(port, "h", 2)
+  emit("server done")
+}
+
+run(boot)

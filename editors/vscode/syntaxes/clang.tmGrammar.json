@@ -1,0 +1,79 @@
+{
+  "scopeName": "source.clang",
+  "name": "CLang",
+  "fileTypes": ["clng", "clngb"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#functions" },
+    { "include": "#variables" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.clang",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.clang",
+          "begin": "(f|r|fr|rf)?\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "variable.interpolation.clang",
+              "match": "\\{[^}]+\\}"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.clang",
+          "begin": "(f|r)?'",
+          "end": "'"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.clang",
+          "match": "\\b(if|else|for|in|return|run)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.clang",
+          "match": "fn::[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "name": "support.function.builtin.clang",
+          "match": "\\b(emit|cap_first|lower|upper|contains|len|split|join|trim|replace|starts_with|ends_with|abs|floor|ceil|sqrt|pow|min|max|str|num|file_read|file_write|json_parse|json_dump|http_get|http_post|http_serve|db_put|db_get|db_list|tbl_put|tbl_get|tbl_list|tbl_del|pmap|exec|env|cli_args|time_now|sleep_ms|rand_seed|rand_int|is_str|is_num|is_list|is_map|type_of|keys|empty_list|mk_user|sort|push)\\b"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.clang",
+          "match": "var:[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.clang",
+          "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+        }
+      ]
+    }
+  }
+}

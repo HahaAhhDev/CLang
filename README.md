@@ -38,11 +38,13 @@ chmod +x app
 
 `clng fmt` prints canonical form. `clng repl` keeps one session across lines. Errors show file plus line plus source plus hint.
 
+https goes through curl with system certs and returns code 0 with a note when the net is down, so sync flows keep local work. Editors live in `editors/` with a VSCode grammar plus Vim syntax.
+
 Run mode follows the approved shortcut: fast path without keeping a build around.
 
 ## Builtins (no imports)
 
-Text `cap_first lower upper contains len split join trim replace starts_with ends_with`, lists `push sort empty_list pmap`, maps `mk_user keys type_of is_str is_num is_list is_map`, files `file_read file_write`, data `json_parse json_dump db_put db_get db_list`, system `time_now sleep_ms env cli_args exec rand_seed rand_int`, math `abs floor ceil sqrt pow min max`, net `http_get` real for http plus `http_post` real for http and stub for https, convert `str num`, output `emit`.
+Text `cap_first lower upper contains len split join trim replace starts_with ends_with`, lists `push sort empty_list pmap`, maps `mk_user keys type_of is_str is_num is_list is_map`, files `file_read file_write`, data `json_parse json_dump db_put db_get db_list tbl_put tbl_get tbl_list tbl_del`, system `time_now sleep_ms env cli_args exec rand_seed rand_int`, math `abs floor ceil sqrt pow min max`, net `http_get` plus `http_post` real for http and system TLS via curl for https, `http_serve` local apps, convert `str num`, output `emit`.
 
 Missing pieces are remade in CLang from bytes plus files plus sockets instead of pulling packages.
 

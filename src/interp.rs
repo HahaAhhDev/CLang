@@ -850,11 +850,7 @@ impl Interp {
                 match (url, body) {
                     (Value::Str(u), Value::Str(b)) => {
                         if u.starts_with("https://") {
-                            eprintln!("note: https post uses local stub in v1, plain http is real");
-                            let mut m = HashMap::new();
-                            m.insert("code".to_string(), Value::Num(200.0));
-                            m.insert("body".to_string(), Value::Str(b));
-                            Ok(Value::Map(m))
+                            do_https("POST", &u, Some(&b), line)
                         } else {
                             do_http("POST", &u, Some(&b), line)
                         }
@@ -871,13 +867,10 @@ impl Interp {
                 match self.eval(&args[0])? {
                     Value::Str(u) => {
                         if u.starts_with("https://") {
-                            return Err(ClangError::new(
-                                line,
-                                "https needs TLS which lands in v2".to_string(),
-                                "use http://127.0.0.1 for local checks".to_string(),
-                            ));
+                            do_https("GET", &u, None, line)
+                        } else {
+                            do_http("GET", &u, None, line)
                         }
-                        do_http("GET", &u, None, line)
                     }
                     other => Err(bad_type(line, "http_get", "string url", other.type_name())),
                 }
@@ -1274,6 +1267,148 @@ impl Interp {
                     other => Err(bad_type(line, "keys", "map", other.type_name())),
                 }
             }
+            "tbl_put" => {
+                need_args(name, args, 4, line)?;
+                let path = self.eval(&args[0])?;
+                let table = self.eval(&args[1])?;
+                let id = self.eval(&args[2])?;
+                let val = self.eval(&args[3])?;
+                match (path, table, id) {
+                    (Value::Str(p), Value::Str(tb), Value::Str(k)) => {
+                        let mut m = load_db_map(&p, line)?;
+                        let mut sub = match m.get(&tb) {
+                            Some(Value::Map(s)) => s.clone(),
+                            Some(_) => {
+                                return Err(ClangError::new(
+                                    line,
+                                    format!("table '{}' is damaged", tb),
+                                    "delete the db file to start fresh".to_string(),
+                                ))
+                            }
+                            None => HashMap::new(),
+                        };
+                        sub.insert(k, val.clone());
+                        m.insert(tb, Value::Map(sub));
+                        save_db_map(&p, &m, line)?;
+                        Ok(val)
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "tbl_put needs (db, table, id, value)".to_string(),
+                        "call tbl_put(\"a.json\", \"users\", \"a\", x)".to_string(),
+                    )),
+                }
+            }
+            "tbl_get" => {
+                need_args(name, args, 3, line)?;
+                match (
+                    self.eval(&args[0])?,
+                    self.eval(&args[1])?,
+                    self.eval(&args[2])?,
+                ) {
+                    (Value::Str(p), Value::Str(tb), Value::Str(k)) => {
+                        let m = load_db_map(&p, line)?;
+                        match m.get(&tb) {
+                            Some(Value::Map(s)) => {
+                                Ok(s.get(&k).cloned().unwrap_or(Value::Null))
+                            }
+                            _ => Ok(Value::Null),
+                        }
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "tbl_get needs (db, table, id)".to_string(),
+                        "call tbl_get(\"a.json\", \"users\", \"a\")".to_string(),
+                    )),
+                }
+            }
+            "tbl_list" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Str(p), Value::Str(tb)) => {
+                        let m = load_db_map(&p, line)?;
+                        match m.get(&tb) {
+                            Some(Value::Map(s)) => {
+                                let mut ks: Vec<Value> = s
+                                    .keys()
+                                    .map(|k| Value::Str(k.clone()))
+                                    .collect();
+                                ks.sort_by(|a, b| a.display().cmp(&b.display()));
+                                Ok(Value::List(ks))
+                            }
+                            _ => Ok(Value::List(Vec::new())),
+                        }
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "tbl_list needs (db, table)".to_string(),
+                        "call tbl_list(\"a.json\", \"users\")".to_string(),
+                    )),
+                }
+            }
+            "tbl_del" => {
+                need_args(name, args, 3, line)?;
+                match (
+                    self.eval(&args[0])?,
+                    self.eval(&args[1])?,
+                    self.eval(&args[2])?,
+                ) {
+                    (Value::Str(p), Value::Str(tb), Value::Str(k)) => {
+                        let mut m = load_db_map(&p, line)?;
+                        let removed = match m.get_mut(&tb) {
+                            Some(Value::Map(s)) => s.remove(&k).is_some(),
+                            _ => false,
+                        };
+                        save_db_map(&p, &m, line)?;
+                        Ok(Value::Bool(removed))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "tbl_del needs (db, table, id)".to_string(),
+                        "call tbl_del(\"a.json\", \"users\", \"a\")".to_string(),
+                    )),
+                }
+            }
+            "http_serve" => {
+                need_args(name, args, 3, line)?;
+                let port = self.eval(&args[0])?;
+                let handler = self.eval(&args[1])?;
+                let max = self.eval(&args[2])?;
+                match (port, handler, max) {
+                    (Value::Num(p), Value::Str(h), Value::Num(n)) => {
+                        let (params, body, _) = self.funcs.get(&h).cloned().ok_or_else(|| {
+                            ClangError::new(
+                                line,
+                                format!("unknown function '{}'", h),
+                                "define it with fn::name(r) { ... }".to_string(),
+                            )
+                        })?;
+                        if params.len() != 1 {
+                            return Err(ClangError::new(
+                                line,
+                                format!("handler '{}' must take one input", h),
+                                "write fn::name(r) { ... }".to_string(),
+                            ));
+                        }
+                        let count = n as i64;
+                        if count < 1 || count > 100000 {
+                            return Err(ClangError::new(
+                                line,
+                                "http_serve count must sit between 1 and 100000".to_string(),
+                                "call http_serve(8080, \"h\", 10)".to_string(),
+                            ));
+                        }
+                        let funcs = self.funcs.clone();
+                        serve_blocking(p as u16, &h, params[0].clone(), body, funcs, count as usize, line)?;
+                        Ok(Value::Null)
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "http_serve needs (port, handler, count)".to_string(),
+                        "call http_serve(8080, \"h\", 10)".to_string(),
+                    )),
+                }
+            }
             "str" => {
                 need_args(name, args, 1, line)?;
                 Ok(Value::Str(self.eval(&args[0])?.display()))
@@ -1318,6 +1453,73 @@ fn parse_http_url(url: &str, line: usize) -> Result<(String, String), ClangError
         Some(i) => Ok((rest[..i].to_string(), rest[i..].to_string())),
         None => Ok((rest.to_string(), "/".to_string())),
     }
+}
+
+fn do_https(method: &str, url: &str, body: Option<&str>, line: usize) -> Result<Value, ClangError> {
+    use std::io::Write;
+    let check = std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .map_err(|_| {
+            ClangError::new(
+                line,
+                "https needs curl on PATH".to_string(),
+                "install curl or use plain http".to_string(),
+            )
+        })?;
+    if !check.status.success() {
+        return Err(ClangError::new(
+            line,
+            "https needs curl on PATH".to_string(),
+            "install curl or use plain http".to_string(),
+        ));
+    }
+    let mut cmd = std::process::Command::new("curl");
+    cmd.arg("-sS")
+        .arg("--max-time")
+        .arg("10")
+        .arg("-w")
+        .arg("\n%{http_code}");
+    if method == "POST" {
+        cmd.arg("-X").arg("POST").arg("--data-binary").arg("@-");
+    }
+    cmd.arg(url);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| {
+        ClangError::new(line, format!("curl failed to start: {}", e), "check curl".to_string())
+    })?;
+    if method == "POST" {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(body.unwrap_or("").as_bytes());
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| {
+        ClangError::new(line, format!("curl failed: {}", e), "check the url".to_string())
+    })?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() && text.trim().is_empty() {
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        let mut m = HashMap::new();
+        m.insert("code".to_string(), Value::Num(0.0));
+        m.insert(
+            "body".to_string(),
+            Value::Str(format!("net down: {}", err.trim())),
+        );
+        return Ok(Value::Map(m));
+    }
+    let mut lines: Vec<&str> = text.lines().collect();
+    let code_text = lines.pop().unwrap_or("0").trim().to_string();
+    let code = code_text.parse::<f64>().unwrap_or(0.0);
+    let mut resp_body = lines.join("\n");
+    if resp_body.ends_with('\n') {
+        resp_body.pop();
+    }
+    let mut m = HashMap::new();
+    m.insert("code".to_string(), Value::Num(code));
+    m.insert("body".to_string(), Value::Str(resp_body));
+    Ok(Value::Map(m))
 }
 
 fn do_http(method: &str, url: &str, body: Option<&str>, line: usize) -> Result<Value, ClangError> {
@@ -1432,6 +1634,147 @@ fn save_db_map(path: &str, m: &HashMap<String, Value>, line: usize) -> Result<()
             "check the folder".to_string(),
         )
     })
+}
+
+fn serve_blocking(
+    port: u16,
+    _handler_name: &str,
+    param: String,
+    body_stmts: Vec<Stmt>,
+    funcs: HashMap<String, (Vec<String>, Vec<Stmt>, usize)>,
+    max_requests: usize,
+    line: usize,
+) -> Result<(), ClangError> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).map_err(|e| {
+        ClangError::new(
+            line,
+            format!("cannot serve on port {}: {}", port, e),
+            "pick a free port".to_string(),
+        )
+    })?;
+    for _ in 0..max_requests {
+        let (mut stream, _) = listener.accept().map_err(|e| {
+            ClangError::new(line, format!("accept failed: {}", e), "retry the serve".to_string())
+        })?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .ok();
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    raw.extend_from_slice(&buf[..n]);
+                    if raw.len() > 65536 {
+                        break;
+                    }
+                    if let Some(pos) = find_header_end(&raw) {
+                        let head = String::from_utf8_lossy(&raw[..pos]).to_string();
+                        let want = content_want(&head);
+                        if raw.len() >= pos + want {
+                            break;
+                        }
+                    }
+                    if raw.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let (method, path, req_body) = parse_http_request(&raw);
+        let mut req = HashMap::new();
+        req.insert("method".to_string(), Value::Str(method));
+        req.insert("path".to_string(), Value::Str(path));
+        req.insert("body".to_string(), Value::Str(req_body));
+        let mut w = Interp::new();
+        w.funcs = funcs.clone();
+        w.scopes.push(HashMap::new());
+        w.set(&param, Value::Map(req));
+        let ret = match w.exec_block(&body_stmts) {
+            Ok(Signal::None) => Value::Null,
+            Ok(Signal::Return(v)) => v,
+            Err(_) => Value::Str("handler failed".to_string()),
+        };
+        let (code, text) = match ret {
+            Value::Str(s) => (200, s),
+            Value::Map(m) => {
+                let c = match m.get("code") {
+                    Some(Value::Num(n)) => *n as u16,
+                    _ => 200,
+                };
+                let b = match m.get("body") {
+                    Some(Value::Str(s)) => s.clone(),
+                    Some(v) => v.display(),
+                    None => String::new(),
+                };
+                (c, b)
+            }
+            other => (200, other.display()),
+        };
+        let reason = match code {
+            200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
+            404 => "Not Found",
+            500 => "Server Error",
+            _ => "OK",
+        };
+        let resp = format!(
+            "HTTP/1.0 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            code,
+            reason,
+            text.len(),
+            text
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    }
+    Ok(())
+}
+
+fn find_header_end(raw: &[u8]) -> Option<usize> {
+    for i in 0..raw.len().saturating_sub(3) {
+        if &raw[i..i + 4] == b"\r\n\r\n" {
+            return Some(i + 4);
+        }
+    }
+    None
+}
+
+fn content_want(head: &str) -> usize {
+    for line in head.lines() {
+        let low = line.to_lowercase();
+        if low.starts_with("content-length:") {
+            if let Some(v) = low.split(':').nth(1) {
+                if let Ok(n) = v.trim().parse::<usize>() {
+                    return n.min(65536);
+                }
+            }
+        }
+    }
+    0
+}
+
+fn parse_http_request(raw: &[u8]) -> (String, String, String) {
+    let text = String::from_utf8_lossy(raw).to_string();
+    let head_end = text
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
+        .or_else(|| text.find("\n\n").map(|i| i + 2))
+        .unwrap_or(text.len());
+    let head = &text[..head_end.min(text.len())];
+    let rest = if head_end <= text.len() {
+        text[head_end..].to_string()
+    } else {
+        String::new()
+    };
+    let first = head.lines().next().unwrap_or("");
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let path = parts.next().unwrap_or("/").to_string();
+    (method, path, rest)
 }
 
 fn need_args(name: &str, args: &[Expr], want: usize, line: usize) -> Result<(), ClangError> {
@@ -1842,5 +2185,58 @@ mod native_red {
         let src = "var:x = file_read(\"a\")\nemit(x)\n";
         let err = crate::codegen::transpile(src).unwrap_err();
         assert!(err.to_string().contains("file_read"));
+    }
+}
+
+#[cfg(test)]
+mod stack5 {
+    use super::Interp;
+
+    fn run_ok(src: &str) -> Vec<String> {
+        let mut ip = Interp::new();
+        ip.run_source(src).expect("program should run");
+        ip.printed.clone()
+    }
+
+    #[test]
+    fn tbl_round_trip() {
+        let path = format!("/tmp/clang_tbl_{}.json", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        let src = format!(
+            "tbl_put(\"{}\", \"users\", \"a\", \"Ann\")\nemit(tbl_get(\"{}\", \"users\", \"a\"))\nemit(len(tbl_list(\"{}\", \"users\")))\n",
+            path, path, path
+        );
+        let out = run_ok(&src);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(out, vec!["Ann", "1"]);
+    }
+
+    #[test]
+    fn serve_one_request() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let src = format!(
+            "fn::h(r) {{\n return(f\"hi {{r.path}}\")\n}}\nvar:res = http_serve({}, \"h\", 1)\nemit(\"served\")\n",
+            port
+        );
+        let handle = std::thread::spawn(move || {
+            let mut ip = Interp::new();
+            ip.run_source(&src).expect("serve runs");
+            ip.printed.clone()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let body = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).map(|mut s| {
+            use std::io::{Read, Write};
+            let req = "GET /yo HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n";
+            s.write_all(req.as_bytes()).ok();
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).ok();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+        let out = handle.join().expect("server done");
+        let text = body.unwrap_or_default();
+        assert!(text.contains("hi /yo"), "got: {}", text);
+        assert_eq!(out, vec!["served"]);
     }
 }
