@@ -13,6 +13,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
+      - name: ensure release exists
+        run: gh release view ${{ github.ref_name }} --json tagName -q .tagName || gh release create ${{ github.ref_name }} --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: upload unix binary
         if: matrix.os == 'ubuntu-latest'
         run: gh release upload ${{ github.ref_name }} target/release/clng#clng-linux-x86_64 --clobber
