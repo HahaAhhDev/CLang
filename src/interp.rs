@@ -12,6 +12,9 @@ pub struct Interp {
     scopes: Vec<HashMap<String, Value>>,
     funcs: HashMap<String, (Vec<String>, Vec<Stmt>, usize)>,
     pub printed: Vec<String>,
+    pub quiet: bool,
+    pub trace: bool,
+    pub trace_log: Vec<String>,
     rng: u64,
     cli: Vec<String>,
 }
@@ -22,6 +25,9 @@ impl Interp {
             scopes: vec![HashMap::new()],
             funcs: HashMap::new(),
             printed: Vec::new(),
+            quiet: false,
+            trace: false,
+            trace_log: Vec::new(),
             rng: 0x12345678,
             cli: Vec::new(),
         }
@@ -107,9 +113,15 @@ impl Interp {
         let prog = p.parse_program()?;
         let walk = std::env::var("CLNG_MODE").unwrap_or_default() == "walk";
         if !walk {
-            match crate::bytecode::try_run(&prog, self.cli.clone()) {
-                Ok(out) => {
+            match crate::bytecode::try_run_opts(
+                &prog,
+                self.cli.clone(),
+                self.trace,
+                self.quiet,
+            ) {
+                Ok((out, log)) => {
                     self.printed.extend(out);
+                    self.trace_log.extend(log);
                     return Ok(());
                 }
                 Err(crate::bytecode::FastError::Unsupported(_)) => {}
@@ -160,6 +172,9 @@ impl Interp {
     }
 
     fn exec_stmt(&mut self, s: &Stmt) -> Result<Signal, ClangError> {
+        if self.trace && self.trace_log.len() < 5000 {
+            self.trace_log.push(format!("{}:{}", stmt_kind(s), stmt_line(s)));
+        }
         match s {
             Stmt::VarDecl(name, e, line) => {
                 let v = self.eval(e)?;
@@ -681,7 +696,9 @@ impl Interp {
                 } else {
                     parts.join(" ")
                 };
-                println!("{}", text);
+                if !self.quiet {
+                    println!("{}", text);
+                }
                 self.printed.push(text);
                 Ok(Value::Null)
             }
@@ -1949,6 +1966,32 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("unknown git error").trim().chars().take(160).collect()
 }
 
+fn stmt_kind(s: &Stmt) -> &'static str {
+    match s {
+        Stmt::VarDecl(..) => "var",
+        Stmt::Assign(..) => "assign",
+        Stmt::ExprStmt(..) => "expr",
+        Stmt::Return(..) => "return",
+        Stmt::Run(..) => "run",
+        Stmt::If(..) => "if",
+        Stmt::For(..) => "for",
+        Stmt::FuncDef(..) => "def",
+    }
+}
+
+fn stmt_line(s: &Stmt) -> usize {
+    match s {
+        Stmt::VarDecl(_, _, l)
+        | Stmt::Assign(_, _, l)
+        | Stmt::ExprStmt(_, l)
+        | Stmt::Return(_, l)
+        | Stmt::Run(_, l)
+        | Stmt::If(_, _, _, l)
+        | Stmt::For(_, _, _, l)
+        | Stmt::FuncDef(_, _, _, l) => *l,
+    }
+}
+
 fn need_args(name: &str, args: &[Expr], want: usize, line: usize) -> Result<(), ClangError> {
     if args.len() != want {
         return Err(ClangError::new(
@@ -2470,5 +2513,27 @@ mod stack5 {
         let text = body.unwrap_or_default();
         assert!(text.contains("hi /yo"), "got: {}", text);
         assert_eq!(out, vec!["served"]);
+    }
+}
+
+#[cfg(test)]
+mod stack7_red {
+    use super::Interp;
+
+    #[test]
+    fn quiet_records_without_printing() {
+        let mut ip = Interp::new();
+        ip.quiet = true;
+        ip.run_source("emit(\"shh\")\n").expect("runs");
+        assert_eq!(ip.printed, vec!["shh"]);
+    }
+
+    #[test]
+    fn trace_collects_stmt_lines() {
+        let mut ip = Interp::new();
+        ip.trace = true;
+        ip.run_source("var:x = 1\nemit(x)\n").expect("runs");
+        assert!(ip.trace_log.len() >= 2, "got {:?}", ip.trace_log);
+        assert!(ip.trace_log.iter().all(|l| l.contains(':')));
     }
 }

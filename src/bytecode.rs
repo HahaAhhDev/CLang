@@ -95,8 +95,18 @@ const PURE_BUILTINS: &[&str] = &[
 ];
 
 pub fn try_run(prog: &[Stmt], cli: Vec<String>) -> Result<Vec<String>, FastError> {
+    try_run_opts(prog, cli, false, false).map(|r| r.0)
+}
+
+pub fn try_run_opts(
+    prog: &[Stmt],
+    cli: Vec<String>,
+    trace: bool,
+    quiet: bool,
+) -> Result<(Vec<String>, Vec<String>), FastError> {
     let unit = compile_prog(prog)?;
-    Ok(exec_unit(&unit, cli)?)
+    let (printed, log) = exec_unit(&unit, cli, trace, quiet)?;
+    Ok((printed, log))
 }
 
 struct Unit {
@@ -486,11 +496,19 @@ struct VM {
     frames: Vec<Frame>,
     globals: HashMap<String, Value>,
     printed: Vec<String>,
+    trace_log: Vec<String>,
+    trace: bool,
+    quiet: bool,
     rng: u64,
     cli: Vec<String>,
 }
 
-fn exec_unit(unit: &Unit, cli: Vec<String>) -> Result<Vec<String>, ClangError> {
+fn exec_unit(
+    unit: &Unit,
+    cli: Vec<String>,
+    trace: bool,
+    quiet: bool,
+) -> Result<(Vec<String>, Vec<String>), ClangError> {
     let mut vm = VM {
         funcs: unit.funcs.clone(),
         stack: Vec::new(),
@@ -503,11 +521,14 @@ fn exec_unit(unit: &Unit, cli: Vec<String>) -> Result<Vec<String>, ClangError> {
         }],
         globals: HashMap::new(),
         printed: Vec::new(),
+        trace_log: Vec::new(),
+        trace,
+        quiet,
         rng: 0x12345678,
         cli,
     };
     run_vm(&mut vm)?;
-    Ok(vm.printed)
+    Ok((vm.printed, vm.trace_log))
 }
 
 fn vm_err(vm: &VM, msg: String, hint: String) -> ClangError {
@@ -536,7 +557,12 @@ fn run_vm(vm: &mut VM) -> Result<(), ClangError> {
         };
         vm.frames.last_mut().unwrap().ip += 1;
         match op {
-            Op::SetLine(n) => vm.frames.last_mut().unwrap().line = n,
+            Op::SetLine(n) => {
+                vm.frames.last_mut().unwrap().line = n;
+                if vm.trace && vm.trace_log.len() < 5000 {
+                    vm.trace_log.push(format!("step:{}", n));
+                }
+            }
             Op::Push(v) => vm.stack.push(v),
             Op::Load(n) => {
                 let fr = vm.frames.last().unwrap();
@@ -1035,7 +1061,9 @@ fn call_builtin(vm: &mut VM, name: &str, args: Vec<Value>) -> Result<Value, Clan
         "emit" => {
             let parts: Vec<String> = args.iter().map(|v| v.display()).collect();
             let text = parts.join(" ");
-            println!("{}", text);
+            if !vm.quiet {
+                println!("{}", text);
+            }
             vm.printed.push(text);
             Ok(Value::Null)
         }

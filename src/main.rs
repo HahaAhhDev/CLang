@@ -18,6 +18,8 @@ fn print_usage() {
     println!("  clng fmt <file.clng>                    print canonical form");
     println!("  clng repl                               interactive loop");
     println!("  clng test [path...]                     run test_ functions");
+    println!("  clng bench [path...]                    time VM versus walk");
+    println!("  flags: --trace                          step log to stderr");
     println!("  clng doc <file.clng>                    print doc stubs");
 }
 
@@ -90,7 +92,12 @@ fn repl() {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let raw: Vec<String> = std::env::args().collect();
+    let trace = raw.iter().any(|a| a == "--trace");
+    let args: Vec<String> = raw.into_iter().filter(|a| a != "--trace").collect();
+    if trace {
+        std::env::set_var("CLNG_TRACE", "1");
+    }
     if args.len() < 2 {
         print_usage();
         std::process::exit(2);
@@ -141,6 +148,9 @@ fn main() {
                 }
             };
             let mut ip = Interp::new();
+            if std::env::var("CLNG_TRACE").unwrap_or_default() == "1" {
+                ip.trace = true;
+            }
             match ip.run_test_fns(&src) {
                 Ok(results) if results.is_empty() => {
                     println!("{}: no test_ functions", f);
@@ -154,6 +164,13 @@ fn main() {
                             }
                             Err(e) => {
                                 println!("{} {} FAIL\n{}", f, name, e);
+                                if ip.trace {
+                                    let tail: Vec<&String> = ip.trace_log.iter().rev().take(15).collect();
+                                    eprintln!("trace tail (latest last):");
+                                    for line in tail.iter().rev() {
+                                        eprintln!("  {}", line);
+                                    }
+                                }
                                 fail += 1;
                             }
                         }
@@ -168,6 +185,80 @@ fn main() {
         println!("{} passed, {} failed", pass, fail);
         if fail > 0 {
             std::process::exit(1);
+        }
+        return;
+    }
+    if args[1] == "bench" {
+        let mut targets: Vec<String> = Vec::new();
+        if args.len() > 2 {
+            for a in &args[2..] {
+                targets.push(a.clone());
+            }
+        } else {
+            targets.push("examples/hello.clng".to_string());
+            targets.push("examples/calculator.clng".to_string());
+        }
+        let mut files: Vec<String> = Vec::new();
+        for target in targets {
+            match std::fs::metadata(&target) {
+                Ok(m) if m.is_dir() => {
+                    let mut entries: Vec<String> = Vec::new();
+                    collect_clng(&target, &mut entries);
+                    entries.sort();
+                    files.extend(entries);
+                }
+                Ok(_) => files.push(target),
+                Err(_) => {
+                    eprintln!("clang error at line 1: no such bench path '{}'", target);
+                    std::process::exit(1);
+                }
+            }
+        }
+        println!("{:24} {:>10} {:>10} {:>8}", "file", "vm ms", "walk ms", "faster");
+        for f in files {
+            let src = match std::fs::read_to_string(&f) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{}: cannot read: {}", f, e);
+                    continue;
+                }
+            };
+            if src.contains("http_serve") {
+                println!("{:24} skipped (serves network)", f);
+                continue;
+            }
+            let mut warm = Interp::new();
+            if warm.run_source(&src).is_err() {
+                println!("{:24} skipped (needs input)", f);
+                continue;
+            }
+            let n = 20;
+            let mut vm_ms = 0.0;
+            let mut walk_ms = 0.0;
+            for _ in 0..n {
+                let mut ip = Interp::new();
+                ip.quiet = true;
+                let start = std::time::Instant::now();
+                let _ = ip.run_source(&src);
+                vm_ms += start.elapsed().as_secs_f64() * 1000.0;
+            }
+            std::env::set_var("CLNG_MODE", "walk");
+            for _ in 0..n {
+                let mut ip = Interp::new();
+                ip.quiet = true;
+                let start = std::time::Instant::now();
+                let _ = ip.run_source(&src);
+                walk_ms += start.elapsed().as_secs_f64() * 1000.0;
+            }
+            std::env::remove_var("CLNG_MODE");
+            let vm_avg = vm_ms / n as f64;
+            let walk_avg = walk_ms / n as f64;
+            let faster = if vm_avg < walk_avg {
+                format!("{:.1}x vm", walk_avg / vm_avg.max(0.001))
+            } else {
+                format!("{:.1}x walk", vm_avg / walk_avg.max(0.001))
+            };
+            println!("{:24} {:>10.2} {:>10.2} {:>8}", f, vm_avg, walk_avg, faster);
         }
         return;
     }
@@ -257,6 +348,9 @@ fn main() {
         }
     };
     let mut ip = Interp::new();
+    if std::env::var("CLNG_TRACE").unwrap_or_default() == "1" {
+        ip.trace = true;
+    }
     if args.len() > 2 {
         ip.set_cli(args[2..].to_vec());
     }

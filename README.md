@@ -52,7 +52,7 @@ Missing pieces are remade in CLang from bytes plus files plus sockets instead of
 
 ## Speed
 
-Runs pick a bytecode VM for pure code and fall back to the tree walk for IO, same output either way. Set CLNG_MODE=walk to force the walk. Interpreter is written in Rust. v1 is a tree walk core, fast for scripts. Native codegen lands next by transpiling the same AST to Rust and calling rustc, which keeps the surface unchanged.
+Runs pick a bytecode VM for pure code and fall back to the tree walk for IO, same output either way. `clng bench` prints the honest table per file. Set CLNG_MODE=walk to force the walk. Native `compile --native` is the real speed path. Releases attach Linux plus Windows binaries. Interpreter is written in Rust. for pure code and fall back to the tree walk for IO, same output either way. Set CLNG_MODE=walk to force the walk. Interpreter is written in Rust. v1 is a tree walk core, fast for scripts. Native codegen lands next by transpiling the same AST to Rust and calling rustc, which keeps the surface unchanged.
 
 ## Layout
 

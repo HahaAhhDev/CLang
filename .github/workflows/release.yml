@@ -1,0 +1,25 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  assets:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: upload unix binary
+        if: matrix.os == 'ubuntu-latest'
+        run: gh release upload ${{ github.ref_name }} target/release/clng#clng-linux-x86_64 --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: upload windows binary
+        if: matrix.os == 'windows-latest'
+        run: gh release upload ${{ github.ref_name }} target/release/clng.exe#clng-windows-x86_64.exe --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
