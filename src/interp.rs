@@ -31,6 +31,69 @@ impl Interp {
         self.cli = args;
     }
 
+    pub fn run_test_fns(
+        &mut self,
+        src: &str,
+    ) -> Result<Vec<(String, Result<(), ClangError>)>, ClangError> {
+        let mut p = Parser::new(src);
+        let prog = p.parse_program()?;
+        let mut setup: Vec<Stmt> = Vec::new();
+        let mut tests: Vec<String> = Vec::new();
+        for s in &prog {
+            match s {
+                Stmt::FuncDef(n, ps, b, line) if n.starts_with("test_") => {
+                    if !ps.is_empty() {
+                        return Err(ClangError::new(
+                            *line,
+                            format!("test '{}' must take no inputs", n),
+                            "write fn::test_name() { ... }".to_string(),
+                        ));
+                    }
+                    if self.funcs.contains_key(n) {
+                        return Err(ClangError::new(
+                            *line,
+                            format!("function '{}' is defined twice", n),
+                            "rename one of them".to_string(),
+                        ));
+                    }
+                    self.funcs.insert(n.clone(), (ps.clone(), b.clone(), *line));
+                    tests.push(n.clone());
+                }
+                Stmt::FuncDef(n, ps, b, line) => {
+                    if self.funcs.contains_key(n) {
+                        return Err(ClangError::new(
+                            *line,
+                            format!("function '{}' is defined twice", n),
+                            "rename one of them".to_string(),
+                        ));
+                    }
+                    self.funcs.insert(n.clone(), (ps.clone(), b.clone(), *line));
+                }
+                _ => setup.push(s.clone()),
+            }
+        }
+        self.scopes.push(HashMap::new());
+        let setup_res = self.exec_block(&setup);
+        self.scopes.pop();
+        if let Err(e) = setup_res {
+            return Err(e);
+        }
+        tests.sort();
+        let mut out = Vec::new();
+        for name in tests {
+            let (ps, body, _) = self.funcs.get(&name).cloned().unwrap_or_default();
+            let _ = ps;
+            self.scopes.push(HashMap::new());
+            let r = match self.exec_block(&body) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            };
+            self.scopes.pop();
+            out.push((name, r));
+        }
+        Ok(out)
+    }
+
     fn next_rand(&mut self) -> u64 {
         self.rng = self
             .rng
@@ -42,10 +105,21 @@ impl Interp {
     pub fn run_source(&mut self, src: &str) -> Result<(), ClangError> {
         let mut p = Parser::new(src);
         let prog = p.parse_program()?;
+        let walk = std::env::var("CLNG_MODE").unwrap_or_default() == "walk";
+        if !walk {
+            match crate::bytecode::try_run(&prog, self.cli.clone()) {
+                Ok(out) => {
+                    self.printed.extend(out);
+                    return Ok(());
+                }
+                Err(crate::bytecode::FastError::Unsupported(_)) => {}
+                Err(crate::bytecode::FastError::Clang(e)) => return Err(e),
+            }
+        }
         self.run_program(&prog)
     }
 
-    fn run_program(&mut self, prog: &[Stmt]) -> Result<(), ClangError> {
+    pub(crate) fn run_program(&mut self, prog: &[Stmt]) -> Result<(), ClangError> {
         for s in prog {
             if let Stmt::FuncDef(name, params, body, line) = s {
                 if self.funcs.contains_key(name) {
@@ -1409,6 +1483,57 @@ impl Interp {
                     )),
                 }
             }
+            "pkg_fetch" => {
+                if args.len() != 1 && args.len() != 2 {
+                    return Err(ClangError::new(
+                        line,
+                        format!("pkg_fetch wants 1 or 2 inputs but got {}", args.len()),
+                        "call pkg_fetch(url) or pkg_fetch(url, name)".to_string(),
+                    ));
+                }
+                let url = self.eval(&args[0])?;
+                let pname = if args.len() == 2 {
+                    self.eval(&args[1])?
+                } else {
+                    Value::Null
+                };
+                match (url, pname) {
+                    (Value::Str(u), Value::Null) => {
+                        let base = u
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("pkg")
+                            .trim_end_matches(".git");
+                        pkg_clone(&u, base, line)
+                    }
+                    (Value::Str(u), Value::Str(n)) => pkg_clone(&u, &n, line),
+                    _ => Err(ClangError::new(
+                        line,
+                        "pkg_fetch needs (url) or (url, name)".to_string(),
+                        "call pkg_fetch(\"https://...\", \"mylib\")".to_string(),
+                    )),
+                }
+            }
+            "assert" => {
+                if args.len() != 1 && args.len() != 2 {
+                    return Err(ClangError::new(
+                        line,
+                        format!("assert wants 1 or 2 inputs but got {}", args.len()),
+                        "call assert(ok) or assert(ok, \"why\")".to_string(),
+                    ));
+                }
+                let cond = self.eval(&args[0])?;
+                if !cond.is_truthy() {
+                    let msg = if args.len() == 2 {
+                        self.eval(&args[1])?.display()
+                    } else {
+                        "check failed".to_string()
+                    };
+                    return Err(ClangError::new(line, format!("assert failed: {}", msg), "inspect the values above".to_string()));
+                }
+                Ok(Value::Null)
+            }
             "str" => {
                 need_args(name, args, 1, line)?;
                 Ok(Value::Str(self.eval(&args[0])?.display()))
@@ -1777,6 +1902,53 @@ fn parse_http_request(raw: &[u8]) -> (String, String, String) {
     (method, path, rest)
 }
 
+fn pkg_clone(url: &str, name: &str, line: usize) -> Result<Value, ClangError> {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return Err(ClangError::new(
+            line,
+            format!("bad package name '{}'", name),
+            "use a plain folder name".to_string(),
+        ));
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let dest = format!("{}/.clng/pkgs/{}", home, name);
+    if std::path::Path::new(&dest).exists() {
+        return Ok(Value::Str(dest));
+    }
+    if let Some(parent) = std::path::Path::new(&dest).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ClangError::new(line, format!("cache setup failed: {}", e), "check HOME".to_string())
+        })?;
+    }
+    let out = std::process::Command::new("git")
+        .arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg(url)
+        .arg(&dest)
+        .output()
+        .map_err(|_| {
+            ClangError::new(
+                line,
+                "pkg_fetch needs git on PATH".to_string(),
+                "install git or vendor the files".to_string(),
+            )
+        })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(ClangError::new(
+            line,
+            format!("git clone failed: {}", first_line(&err)),
+            "check the url".to_string(),
+        ));
+    }
+    Ok(Value::Str(dest))
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("unknown git error").trim().chars().take(160).collect()
+}
+
 fn need_args(name: &str, args: &[Expr], want: usize, line: usize) -> Result<(), ClangError> {
     if args.len() != want {
         return Err(ClangError::new(
@@ -2084,6 +2256,66 @@ mod tests {
         let src = "fn::div[a, b] {\n if(b == 0) {\n emit(\"bad\")\n return(0)\n } else {\n return(a / b)\n }\n}\nemit(div(20, 4))\nemit(div(1, 0))\n";
         let out = run_ok(src);
         assert_eq!(out, vec!["5", "bad", "0"]);
+    }
+
+    #[test]
+    fn test_runner_reports_pass_and_fail() {
+        let src = "fn::test_ok() {\n emit(\"fine\")\n}\nfn::test_bad() {\n emit(missing)\n}\n";
+        let mut ip = Interp::new();
+        let res = ip.run_test_fns(src).expect("runner runs");
+        assert_eq!(res.len(), 2);
+        assert!(res[0].0 == "test_bad" || res[0].0 == "test_ok");
+        let bad = res.iter().find(|(n, _)| n == "test_bad").unwrap();
+        let ok = res.iter().find(|(n, _)| n == "test_ok").unwrap();
+        assert!(bad.1.is_err());
+        assert!(ok.1.is_ok());
+    }
+
+    #[test]
+    fn pkg_fetch_clones_local_git() {
+        let base = format!("/tmp/clang_pkg_src_{}", std::process::id());
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&base)
+            .status()
+            .expect("git")
+            .success());
+        std::fs::write(format!("{}/note.txt", base), "hi").expect("write");
+        let st = std::process::Command::new("git")
+            .args(["-C", &base, "add", "."])
+            .status()
+            .expect("add");
+        assert!(st.success());
+        let cm = std::process::Command::new("git")
+            .args([
+                "-C",
+                &base,
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "seed",
+            ])
+            .status()
+            .expect("commit");
+        assert!(cm.success());
+        let url = format!("file://{}", base);
+        let name = format!("clangt{}", std::process::id());
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let dest = format!("{}/.clng/pkgs/{}", home, name);
+        let _ = std::fs::remove_dir_all(&dest);
+        let src = format!("var:d = pkg_fetch(\"{}\", \"{}\")\nemit(d)\n", url, name);
+        let mut ip = Interp::new();
+        ip.run_source(&src).expect("fetch runs");
+        assert!(std::path::Path::new(&format!("{}/note.txt", dest)).exists());
+        assert_eq!(ip.printed, vec![dest.clone()]);
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[test]

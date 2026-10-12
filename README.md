@@ -30,6 +30,8 @@ clng compile app.clng -o app.clngb
 clng compile --native app.clng -o app
 clng fmt app.clng
 clng repl
+clng test examples/
+clng doc app.clng
 chmod +x app
 ./app
 ```
@@ -44,13 +46,13 @@ Run mode follows the approved shortcut: fast path without keeping a build around
 
 ## Builtins (no imports)
 
-Text `cap_first lower upper contains len split join trim replace starts_with ends_with`, lists `push sort empty_list pmap`, maps `mk_user keys type_of is_str is_num is_list is_map`, files `file_read file_write`, data `json_parse json_dump db_put db_get db_list tbl_put tbl_get tbl_list tbl_del`, system `time_now sleep_ms env cli_args exec rand_seed rand_int`, math `abs floor ceil sqrt pow min max`, net `http_get` plus `http_post` real for http and system TLS via curl for https, `http_serve` local apps, convert `str num`, output `emit`.
+Text `cap_first lower upper contains len split join trim replace starts_with ends_with`, lists `push sort empty_list pmap`, maps `mk_user keys type_of is_str is_num is_list is_map`, files `file_read file_write`, data `json_parse json_dump db_put db_get db_list tbl_put tbl_get tbl_list tbl_del`, system `time_now sleep_ms env cli_args exec rand_seed rand_int`, math `abs floor ceil sqrt pow min max`, net `http_get` plus `http_post` real for http and system TLS via curl for https, `http_serve` local apps, convert `str num`, check `assert`, fetch `pkg_fetch`, output `emit`.
 
 Missing pieces are remade in CLang from bytes plus files plus sockets instead of pulling packages.
 
 ## Speed
 
-Interpreter is written in Rust. v1 is a tree walk core, fast for scripts. Native codegen lands next by transpiling the same AST to Rust and calling rustc, which keeps the surface unchanged.
+Runs pick a bytecode VM for pure code and fall back to the tree walk for IO, same output either way. Set CLNG_MODE=walk to force the walk. Interpreter is written in Rust. v1 is a tree walk core, fast for scripts. Native codegen lands next by transpiling the same AST to Rust and calling rustc, which keeps the surface unchanged.
 
 ## Layout
 

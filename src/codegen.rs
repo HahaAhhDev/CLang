@@ -321,6 +321,14 @@ fn b_str(a: &V) -> V {
     V::Str(disp(a))
 }
 
+fn b_assert(a: &V, msg: &V) -> V {
+    if !truthy(a) {
+        eprintln!("clang error: assert failed: {}", disp(msg));
+        std::process::exit(1);
+    }
+    V::Null
+}
+
 fn b_num(a: &V) -> V {
     match a {
         V::Num(n) => V::Num(*n),
@@ -516,6 +524,16 @@ fn expr_rust(e: &Expr, locals: &HashSet<String>, globals: &HashSet<String>) -> R
                 "str" => Ok(format!("b_str(&{})", parts[0])),
                 "num" => Ok(format!("b_num(&{})", parts[0])),
                 "empty_list" => Ok("V::List(vec![])".to_string()),
+                "assert" => {
+                    if parts.len() == 1 {
+                        Ok(format!(
+                            "b_assert(&{}, &V::Str(\"check failed\".to_string()))",
+                            parts[0]
+                        ))
+                    } else {
+                        Ok(format!("b_assert(&{}, &{})", parts[0], parts[1]))
+                    }
+                }
                 _ => {
                     let _ = line;
                     Ok(format!("{}({})", n, parts.join(", ")))

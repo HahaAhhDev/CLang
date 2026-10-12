@@ -154,6 +154,16 @@ fn expr_fmt(e: &Expr) -> Result<String, ClangError> {
 
 #[cfg(test)]
 mod tests {
+    use super::doc_stubs;
+
+    #[test]
+    fn doc_picks_notes() {
+        let src = "# adds two\n# keep small\nfn::add[a, b] {\n return(a + b)\n}\n";
+        let out = doc_stubs(src);
+        assert!(out.contains("## add"));
+        assert!(out.contains("adds two"));
+    }
+
     use super::format_src;
 
     #[test]
@@ -165,4 +175,44 @@ mod tests {
         assert!(once.contains("var:response"));
         assert!(once.contains("fn::allerg(r)"));
     }
+}
+
+pub fn doc_stubs(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = String::from("# CLang docs\n");
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if t.starts_with("fn::") {
+            let name = t[4..]
+                .split(|c| c == '(' || c == '[' || c == ' ' || c == '{')
+                .next()
+                .unwrap_or("?");
+            let mut notes: Vec<&str> = Vec::new();
+            let mut j = i;
+            while j > 0 {
+                j -= 1;
+                let prev = lines[j].trim();
+                if prev.starts_with('#') {
+                    notes.push(prev[1..].trim());
+                } else if prev.is_empty() {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            notes.reverse();
+            out.push_str(&format!("\n## {}\n", name));
+            if notes.is_empty() {
+                out.push_str("no notes yet\n");
+            } else {
+                for n in notes {
+                    out.push_str(n);
+                    out.push('\n');
+                }
+            }
+        }
+        i += 1;
+    }
+    out
 }

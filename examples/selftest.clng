@@ -1,0 +1,9 @@
+# checks the core stays honest
+fn::test_add() {
+  assert(2 + 3 == 5, "math broke")
+}
+
+# caps the first letter
+fn::test_cap() {
+  assert(cap_first("hi") == "Hi", "cap broke")
+}

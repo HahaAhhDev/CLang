@@ -1,3 +1,4 @@
+mod bytecode;
 mod codegen;
 mod compile;
 mod error;
@@ -16,6 +17,8 @@ fn print_usage() {
     println!("  clng compile <file.clng> [-o out] [--native]  build it");
     println!("  clng fmt <file.clng>                    print canonical form");
     println!("  clng repl                               interactive loop");
+    println!("  clng test [path...]                     run test_ functions");
+    println!("  clng doc <file.clng>                    print doc stubs");
 }
 
 fn report(path: &str, err: &error::ClangError) {
@@ -30,6 +33,19 @@ fn report(path: &str, err: &error::ClangError) {
             eprintln!(" --> {}:{}", path, err.line);
             eprintln!("  | {}", body);
             eprintln!("  | {}^", " ".repeat(body.chars().count().min(60)));
+        }
+    }
+}
+
+fn collect_clng(dir: &str, out: &mut Vec<String>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_clng(&path.to_string_lossy(), out);
+            } else if path.extension().map(|e| e == "clng").unwrap_or(false) {
+                out.push(path.to_string_lossy().to_string());
+            }
         }
     }
 }
@@ -81,6 +97,95 @@ fn main() {
     }
     if args[1] == "repl" {
         repl();
+        return;
+    }
+    if args[1] == "test" {
+        let mut targets: Vec<String> = Vec::new();
+        if args.len() > 2 {
+            for a in &args[2..] {
+                targets.push(a.clone());
+            }
+        } else {
+            targets.push("tests".to_string());
+        }
+        let mut files: Vec<String> = Vec::new();
+        for target in targets {
+            let meta = std::fs::metadata(&target);
+            match meta {
+                Ok(m) if m.is_dir() => {
+                    let mut entries: Vec<String> = Vec::new();
+                    collect_clng(&target, &mut entries);
+                    entries.sort();
+                    files.extend(entries);
+                }
+                Ok(_) => files.push(target),
+                Err(_) => {
+                    eprintln!("clang error at line 1: no such test path '{}'", target);
+                    std::process::exit(1);
+                }
+            }
+        }
+        if files.is_empty() {
+            println!("no test files found");
+            return;
+        }
+        let mut pass = 0;
+        let mut fail = 0;
+        for f in files {
+            let src = match std::fs::read_to_string(&f) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{}: cannot read: {}", f, e);
+                    fail += 1;
+                    continue;
+                }
+            };
+            let mut ip = Interp::new();
+            match ip.run_test_fns(&src) {
+                Ok(results) if results.is_empty() => {
+                    println!("{}: no test_ functions", f);
+                }
+                Ok(results) => {
+                    for (name, r) in results {
+                        match r {
+                            Ok(()) => {
+                                println!("{} {} ok", f, name);
+                                pass += 1;
+                            }
+                            Err(e) => {
+                                println!("{} {} FAIL\n{}", f, name, e);
+                                fail += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("{}: setup FAIL\n{}", f, e);
+                    fail += 1;
+                }
+            }
+        }
+        println!("{} passed, {} failed", pass, fail);
+        if fail > 0 {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args[1] == "doc" {
+        if args.len() < 3 {
+            eprintln!("clang error at line 1: missing input file");
+            eprintln!("help: run clng doc app.clng");
+            std::process::exit(1);
+        }
+        let path = args[2].clone();
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("clang error at line 1: cannot read '{}': {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        print!("{}", fmt::doc_stubs(&src));
         return;
     }
     if args[1] == "fmt" {
