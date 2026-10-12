@@ -1,0 +1,66 @@
+var:store = "/tmp/clang_vault.json"
+var:cache_hits = 0
+
+fn::load_store() {
+  var:raw = file_read(store)
+  if(raw == "") {
+    emit("vault empty, seeding")
+    return(empty_list())
+  }
+  return(json_parse(raw))
+}
+
+fn::mk_task[t, pri] {
+  var:m = mk_user(t, "local", pri)
+  return(m)
+}
+
+fn::score(t) {
+  return(t.age)
+}
+
+fn::filter_by[items, min] {
+  var:out = empty_list()
+  for(x in items) {
+    if(score(x) >= min) {
+      push(out, x)
+    }
+  }
+  return(out)
+}
+
+fn::summarize(items) {
+  var:total = len(items)
+  var:names = ""
+  for(x in items) {
+    var:names = names + x.name + " "
+  }
+  emit(f"tasks {total} :: {names}")
+  return(total)
+}
+
+fn::save(items) {
+  var:text = json_dump(items)
+  file_write(store, text)
+  return(len(items))
+}
+
+fn::boot() {
+  emit(r"C:\vault\start")
+  var:items = load_store()
+  var:a = mk_task("write spec", 3)
+  var:b = mk_task("ship v1", 5)
+  var:c = mk_task("fix errors", 4)
+  push(items, a)
+  push(items, b)
+  push(items, c)
+  var:hot = filter_by(items, 4)
+  var:ordered = sort(hot, "age", "desc")
+  summarize(ordered)
+  var:n = save(items)
+  emit(f"saved {n} tasks")
+  var:slice = items[0:2]
+  emit(f"top slice holds {len(slice)}")
+}
+
+run(boot)

@@ -1,0 +1,52 @@
+var:title = "clang calc"
+var:last = 0
+
+fn::add[a, b] {
+  var:out = a + b
+  var:last = out
+  emit(f"add {a} + {b} = {out}")
+  return(out)
+}
+
+fn::sub[a, b] {
+  var:out = a - b
+  var:last = out
+  emit(f"sub {a} - {b} = {out}")
+  return(out)
+}
+
+fn::mul[a, b] {
+  var:out = a * b
+  var:last = out
+  emit(f"mul {a} * {b} = {out}")
+  return(out)
+}
+
+fn::div[a, b] {
+  if(b == 0) {
+    emit("error div by zero, keeping last")
+    emit(last)
+    return(last)
+  } else {
+    var:out = a / b
+    var:last = out
+    emit(f"div {a} / {b} = {out}")
+    return(out)
+  }
+}
+
+fn::show(r) {
+  emit(f"result is {r}")
+}
+
+fn::boot() {
+  emit(title)
+  add(12, 8)
+  sub(20, 5)
+  mul(6, 7)
+  div(20, 4)
+  div(10, 0)
+  show(last)
+}
+
+run(boot)

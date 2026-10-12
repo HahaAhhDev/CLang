@@ -1,0 +1,9 @@
+[package]
+name = "clng"
+version = "0.1.0"
+edition = "2021"
+description = "CLang interpreter and compiler"
+license = "MIT"
+authors = ["clang"]
+
+[dependencies]

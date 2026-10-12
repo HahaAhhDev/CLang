@@ -1,0 +1,12 @@
+var:response = "world"
+
+fn::allerg(r) {
+  var:out = cap_first(r)
+  emit(out)
+}
+
+fn::boot() {
+  allerg(response)
+}
+
+run(boot)

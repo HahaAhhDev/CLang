@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+ALLOW = {"MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"}
+
+def find_root():
+    here = pathlib.Path.cwd()
+    for p in [here] + list(here.parents):
+        if (p / "Cargo.toml").exists():
+            return p
+    if (ROOT / "Cargo.toml").exists():
+        return ROOT
+    return here
+DENY_PAT = re.compile(r"GPL|AGPL|LGPL|SSPL|Commons Clause", re.IGNORECASE)
+
+def check_cargo_toml():
+    root = find_root()
+    cargo = root / "Cargo.toml"
+    if not cargo.exists():
+        return [f"no Cargo.toml found from {root}, run secular inside the repo"]
+    text = cargo.read_text()
+    m = re.search(r'license\s*=\s*"([^"]+)"', text)
+    if not m:
+        return ["Cargo.toml misses license field"]
+    lic = m.group(1)
+    if lic not in ALLOW:
+        return [f"Cargo.toml license '{lic}' is not in allow list {sorted(ALLOW)}"]
+    return []
+
+def scan_sources():
+    bad = []
+    root = find_root()
+    for p in list((root / "src").rglob("*.rs")):
+        if p.is_dir():
+            continue
+        try:
+            t = p.read_text(errors="ignore")
+        except Exception as e:
+            bad.append(f"{p}: cannot read: {e}")
+            continue
+        if DENY_PAT.search(t):
+            bad.append(f"{p}: mentions a denied license token")
+    return bad
+
+def main():
+    errs = []
+    errs += check_cargo_toml()
+    errs += scan_sources()
+    if errs:
+        print("secular: license mismatch found")
+        for e in errs:
+            print(" - " + e)
+        return 1
+    print("secular: ok, no license mismatches")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

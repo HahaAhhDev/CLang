@@ -1,0 +1,61 @@
+var:path = "/tmp/clang_contacts.json"
+var:last_ok = "ok"
+
+fn::load_contacts() {
+  var:raw = file_read(path)
+  if(raw == "") {
+    emit("note empty store, starting fresh")
+    return(empty_list())
+  }
+  var:users = json_parse(raw)
+  return(users)
+}
+
+fn::format_user(u) {
+  var:line = f"{u.name} <{u.mail}> age {u.age}"
+  return(line)
+}
+
+fn::find_user[users, q] {
+  var:hits = empty_list()
+  for(u in users) {
+    if(contains(lower(u.name), lower(q))) {
+      push(hits, u)
+    }
+  }
+  return(hits)
+}
+
+fn::sort_by_age[users, order] {
+  var:done = sort(users, "age", order)
+  return(done)
+}
+
+fn::save_and_sync[users, url] {
+  var:text = json_dump(users)
+  file_write(path, text)
+  var:resp = http_post(url, text)
+  if(resp.code != 200) {
+    emit(f"sync failed code {resp.code}, kept local file")
+    return(path)
+  }
+  var:last_ok = resp.body
+  return(last_ok)
+}
+
+fn::boot() {
+  var:users = load_contacts()
+  var:ana = mk_user("Ana", "ana@mail.com", 31)
+  var:bo = mk_user("Bo", "bo@mail.com", 24)
+  push(users, ana)
+  push(users, bo)
+  var:hits = find_user(users, "an")
+  for(h in hits) {
+    emit(format_user(h))
+  }
+  var:ordered = sort_by_age(users, "asc")
+  save_and_sync(ordered, "https://api.example.com/sync")
+  emit(f"done count {len(ordered)}")
+}
+
+run(boot)
