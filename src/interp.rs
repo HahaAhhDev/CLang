@@ -1826,3 +1826,21 @@ mod tests {
         assert_eq!(out, vec!["2", "6"]);
     }
 }
+
+#[cfg(test)]
+mod native_red {
+    #[test]
+    fn native_transpiles_hello() {
+        let src = "var:x = \"world\"\nemit(cap_first(x))\n";
+        let out = crate::codegen::transpile(src).expect("native should build hello");
+        assert!(out.contains("cap_first"));
+        assert!(out.contains("fn main"));
+    }
+
+    #[test]
+    fn native_rejects_io_with_names() {
+        let src = "var:x = file_read(\"a\")\nemit(x)\n";
+        let err = crate::codegen::transpile(src).unwrap_err();
+        assert!(err.to_string().contains("file_read"));
+    }
+}

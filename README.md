@@ -27,11 +27,16 @@ Rules:
 ```
 clng app.clng
 clng compile app.clng -o app.clngb
+clng compile --native app.clng -o app
+clng fmt app.clng
+clng repl
 chmod +x app
 ./app
 ```
 
-`clng file` runs direct. `clng compile` writes obfuscated `app.clngb` plus a launcher `app` you can `chmod +x` and run. The bundle is xor plus base64 with stripped symbols so source is much harder to recover. No bundle is ever fully unrecoverable, this one only raises the bar.
+`clng file` runs direct. `clng compile` writes obfuscated `app.clngb` plus sh plus bat launchers you can `chmod +x` and run. `clng compile --native` builds a real standalone binary through rustc for the core pure subset, and names blocked IO calls with a fallback hint when the file needs plain compile. The bundle is xor plus base64 with stripped symbols so source is much harder to recover. No bundle is ever fully unrecoverable, this one only raises the bar.
+
+`clng fmt` prints canonical form. `clng repl` keeps one session across lines. Errors show file plus line plus source plus hint.
 
 Run mode follows the approved shortcut: fast path without keeping a build around.
 
