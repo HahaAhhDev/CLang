@@ -849,17 +849,142 @@ impl Interp {
                 let body = self.eval(&args[1])?;
                 match (url, body) {
                     (Value::Str(u), Value::Str(b)) => {
-                        eprintln!("note: v1 http_post is a local stub, real net lands in v2 ({})", u);
-                        let mut m = HashMap::new();
-                        m.insert("code".to_string(), Value::Num(200.0));
-                        m.insert("body".to_string(), Value::Str(b));
-                        let _ = u;
-                        Ok(Value::Map(m))
+                        if u.starts_with("https://") {
+                            eprintln!("note: https post uses local stub in v1, plain http is real");
+                            let mut m = HashMap::new();
+                            m.insert("code".to_string(), Value::Num(200.0));
+                            m.insert("body".to_string(), Value::Str(b));
+                            Ok(Value::Map(m))
+                        } else {
+                            do_http("POST", &u, Some(&b), line)
+                        }
                     }
                     _ => Err(ClangError::new(
                         line,
                         "http_post needs (url, body)".to_string(),
                         "call http_post(url, text)".to_string(),
+                    )),
+                }
+            }
+            "http_get" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Str(u) => {
+                        if u.starts_with("https://") {
+                            return Err(ClangError::new(
+                                line,
+                                "https needs TLS which lands in v2".to_string(),
+                                "use http://127.0.0.1 for local checks".to_string(),
+                            ));
+                        }
+                        do_http("GET", &u, None, line)
+                    }
+                    other => Err(bad_type(line, "http_get", "string url", other.type_name())),
+                }
+            }
+            "db_put" => {
+                need_args(name, args, 3, line)?;
+                let path = self.eval(&args[0])?;
+                let key = self.eval(&args[1])?;
+                let val = self.eval(&args[2])?;
+                match (path, key) {
+                    (Value::Str(p), Value::Str(k)) => {
+                        let mut m = load_db_map(&p, line)?;
+                        m.insert(k, val.clone());
+                        save_db_map(&p, &m, line)?;
+                        Ok(val)
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "db_put needs (path, key, value)".to_string(),
+                        "call db_put(\"a.json\", \"k\", \"v\")".to_string(),
+                    )),
+                }
+            }
+            "db_get" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Str(p), Value::Str(k)) => {
+                        let m = load_db_map(&p, line)?;
+                        Ok(m.get(&k).cloned().unwrap_or(Value::Null))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "db_get needs (path, key)".to_string(),
+                        "call db_get(\"a.json\", \"k\")".to_string(),
+                    )),
+                }
+            }
+            "db_list" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Str(p) => {
+                        let m = load_db_map(&p, line)?;
+                        let mut ks: Vec<Value> =
+                            m.keys().map(|k| Value::Str(k.clone())).collect();
+                        ks.sort_by(|a, b| a.display().cmp(&b.display()));
+                        Ok(Value::List(ks))
+                    }
+                    other => Err(bad_type(line, "db_list", "string path", other.type_name())),
+                }
+            }
+            "pmap" => {
+                need_args(name, args, 2, line)?;
+                let items = self.eval(&args[0])?;
+                let fname = self.eval(&args[1])?;
+                match (items, fname) {
+                    (Value::List(v), Value::Str(f)) => {
+                        let (params, body, _) = self.funcs.get(&f).cloned().ok_or_else(|| {
+                            ClangError::new(
+                                line,
+                                format!("unknown function '{}'", f),
+                                "define it with fn::name(r) { ... }".to_string(),
+                            )
+                        })?;
+                        if params.len() != 1 {
+                            return Err(ClangError::new(
+                                line,
+                                format!("pmap needs a one input function, '{}' takes {}", f, params.len()),
+                                "write fn::name(r) { ... }".to_string(),
+                            ));
+                        }
+                        let funcs = self.funcs.clone();
+                        let mut handles = Vec::new();
+                        for item in v {
+                            let fc = funcs.clone();
+                            let ps = params.clone();
+                            let bd = body.clone();
+                            handles.push(std::thread::spawn(move || {
+                                let mut w = Interp::new();
+                                w.funcs = fc;
+                                w.scopes.push(HashMap::new());
+                                w.set(&ps[0], item);
+                                match w.exec_block(&bd) {
+                                    Ok(Signal::None) => Value::Null,
+                                    Ok(Signal::Return(r)) => r,
+                                    Err(_) => Value::Null,
+                                }
+                            }));
+                        }
+                        let mut out = Vec::new();
+                        for h in handles {
+                            match h.join() {
+                                Ok(val) => out.push(val),
+                                Err(_) => {
+                                    return Err(ClangError::new(
+                                        line,
+                                        "worker thread failed".to_string(),
+                                        "keep mapped functions pure".to_string(),
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(Value::List(out))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "pmap needs (list, fn name)".to_string(),
+                        "call pmap([1, 2], \"dbl\")".to_string(),
                     )),
                 }
             }
@@ -1179,6 +1304,134 @@ impl Interp {
             )),
         }
     }
+}
+
+fn parse_http_url(url: &str, line: usize) -> Result<(String, String), ClangError> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        ClangError::new(
+            line,
+            format!("bad url '{}'", url),
+            "use http://host/path".to_string(),
+        )
+    })?;
+    match rest.find('/') {
+        Some(i) => Ok((rest[..i].to_string(), rest[i..].to_string())),
+        None => Ok((rest.to_string(), "/".to_string())),
+    }
+}
+
+fn do_http(method: &str, url: &str, body: Option<&str>, line: usize) -> Result<Value, ClangError> {
+    use std::io::{Read, Write};
+    let (host_port, path) = parse_http_url(url, line)?;
+    let host = host_port.split(':').next().unwrap_or(&host_port).to_string();
+    let addrs: Vec<std::net::SocketAddr> = format!("{}", host_port)
+        .parse()
+        .map(|a| vec![a])
+        .unwrap_or_else(|_| {
+            use std::net::ToSocketAddrs;
+            host_port
+                .to_socket_addrs()
+                .map(|it| it.collect())
+                .unwrap_or_default()
+        });
+    if addrs.is_empty() {
+        return Err(ClangError::new(
+            line,
+            format!("cannot resolve '{}'", host_port),
+            "check the host and port".to_string(),
+        ));
+    }
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &addrs[0],
+        std::time::Duration::from_secs(5),
+    )
+    .map_err(|e| {
+        ClangError::new(
+            line,
+            format!("cannot connect to '{}': {}", host_port, e),
+            "is the server up".to_string(),
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
+    let req = if method == "POST" {
+        let b = body.unwrap_or("");
+        format!(
+            "POST {} HTTP/1.0\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path,
+            host,
+            b.len(),
+            b
+        )
+    } else {
+        format!(
+            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, host
+        )
+    };
+    stream.write_all(req.as_bytes()).map_err(|e| {
+        ClangError::new(line, format!("send failed: {}", e), "retry the request".to_string())
+    })?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(|e| {
+        ClangError::new(line, format!("read failed: {}", e), "retry the request".to_string())
+    })?;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let split = text.find("\r\n\r\n").map(|i| i + 4).or_else(|| text.find("\n\n").map(|i| i + 2));
+    let (head, resp_body) = match split {
+        Some(i) => (text[..i].to_string(), text[i..].to_string()),
+        None => (text.clone(), String::new()),
+    };
+    let code = head
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let mut m = HashMap::new();
+    m.insert("code".to_string(), Value::Num(code));
+    m.insert("body".to_string(), Value::Str(resp_body));
+    Ok(Value::Map(m))
+}
+
+fn load_db_map(path: &str, line: usize) -> Result<HashMap<String, Value>, ClangError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => {
+            return Err(ClangError::new(
+                line,
+                format!("cannot read db '{}': {}", path, e),
+                "check the path".to_string(),
+            ))
+        }
+    };
+    let t = text.trim();
+    if t.is_empty() {
+        return Ok(HashMap::new());
+    }
+    match parse_json_value(t, line)? {
+        Value::Map(m) => Ok(m),
+        _ => Err(ClangError::new(
+            line,
+            "db file must hold an object".to_string(),
+            "delete it to start fresh".to_string(),
+        )),
+    }
+}
+
+fn save_db_map(path: &str, m: &HashMap<String, Value>, line: usize) -> Result<(), ClangError> {
+    let v = Value::Map(m.clone());
+    std::fs::write(path, json_dump(&v)).map_err(|e| {
+        ClangError::new(
+            line,
+            format!("cannot write db '{}': {}", path, e),
+            "check the folder".to_string(),
+        )
+    })
 }
 
 fn need_args(name: &str, args: &[Expr], want: usize, line: usize) -> Result<(), ClangError> {
@@ -1524,5 +1777,52 @@ mod tests {
         let src = "rand_seed(7)\nvar:a = rand_int(1, 10)\nrand_seed(7)\nvar:b = rand_int(1, 10)\nemit(a == b)\nemit(type_of(a))\nemit(is_num(a))\nemit(is_str(\"x\"))\n";
         let out = run_ok(src);
         assert_eq!(out, vec!["true", "num", "true", "true"]);
+    }
+
+    #[test]
+    fn http_get_local_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = "hi";
+                let resp = format!(
+                    "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        let src = format!(
+            "var:r = http_get(\"http://127.0.0.1:{}/x\")\nemit(r.code)\nemit(r.body)\n",
+            port
+        );
+        let out = run_ok(&src);
+        let _ = handle.join();
+        assert_eq!(out, vec!["200", "hi"]);
+    }
+
+    #[test]
+    fn db_put_get_round_trip() {
+        let path = format!("/tmp/clang_test_db_{}.json", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        let src = format!(
+            "db_put(\"{}\", \"k\", \"v\")\nvar:g = db_get(\"{}\", \"k\")\nemit(g)\nemit(len(db_list(\"{}\")))\n",
+            path, path, path
+        );
+        let out = run_ok(&src);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(out, vec!["v", "1"]);
+    }
+
+    #[test]
+    fn pmap_keeps_order() {
+        let src = "fn::dbl(r) {\n var:o = r * 2\n return(o)\n}\nvar:out = pmap([1, 2, 3], \"dbl\")\nemit(out[0])\nemit(out[2])\n";
+        let out = run_ok(src);
+        assert_eq!(out, vec!["2", "6"]);
     }
 }

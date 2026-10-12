@@ -1,5 +1,6 @@
 use crate::error::ClangError;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 const XOR_KEY: u8 = 0x5A;
@@ -142,15 +143,22 @@ pub fn compile_source(src_path: &str, out_path: &str) -> Result<(), ClangError> 
             "check the output folder".to_string(),
         )
     })?;
-    let mut perms = fs::metadata(&launch_name)
-        .map_err(|e| ClangError::new(1, e.to_string(), "check the file".to_string()))?
-        .permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&launch_name, perms).map_err(|e| {
-        ClangError::new(1, e.to_string(), "chmod failed".to_string())
-    })?;
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&launch_name)
+            .map_err(|e| ClangError::new(1, e.to_string(), "check the file".to_string()))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&launch_name, perms).map_err(|e| {
+            ClangError::new(1, e.to_string(), "chmod failed".to_string())
+        })?;
+    }
+    let bat_name = format!("{}.bat", launch_name);
+    let bat = format!("@echo off\r\nrem generated launcher for Windows\r\nclng \"%~dpn0.clngb\" %*\r\n");
+    let _ = fs::write(&bat_name, bat);
     println!("wrote {} and launcher {}", out_path, launch_name);
     println!("run with: chmod +x {} && ./{}", launch_name, launch_name);
+    println!("windows: {} {}", bat_name, out_path);
     Ok(())
 }
 

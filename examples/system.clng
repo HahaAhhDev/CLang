@@ -1,0 +1,21 @@
+var:db = "/tmp/clang_system_db.json"
+
+fn::dbl(r) {
+  var:o = r * 2
+  return(o)
+}
+
+fn::boot() {
+  db_put(db, "app", "clang")
+  emit(f"db has {db_get(db, \"app\")}")
+  emit(f"keys {len(db_list(db))}")
+  var:nums = [1, 2, 3, 4]
+  var:doubled = pmap(nums, "dbl")
+  emit(f"pmap got {len(doubled)} items")
+  emit(doubled[0])
+  emit(doubled[3])
+  var:who = exec("whoami")
+  emit(f"ran as {who}")
+}
+
+run(boot)
