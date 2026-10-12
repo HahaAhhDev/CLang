@@ -1,0 +1,26 @@
+var:text = "  red,green,blue "
+var:parts = split(trim(text), ",")
+var:back = join(parts, "|")
+
+fn::show_one(s) {
+  emit(f"part {s}")
+  return(s)
+}
+
+fn::boot() {
+  emit(back)
+  emit(f"has red {contains(text, \"red\")}")
+  emit(f"starts {starts_with(trim(text), \"red\")}")
+  emit(f"pow {pow(2, 8)} sqrt {sqrt(81)}")
+  rand_seed(42)
+  var:r = rand_int(1, 100)
+  emit(f"rand {r} type {type_of(r)}")
+  var:out = exec("echo hi")
+  emit(f"exec gave {out}")
+  for(p in parts) {
+    show_one(trim(p))
+  }
+  emit(f"cli count {len(cli_args())}")
+}
+
+run(boot)

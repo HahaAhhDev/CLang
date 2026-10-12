@@ -51,6 +51,9 @@ fn main() {
         }
     };
     let mut ip = Interp::new();
+    if args.len() > 2 {
+        ip.set_cli(args[2..].to_vec());
+    }
     if let Err(e) = ip.run_source(&src) {
         eprintln!("{}", e);
         std::process::exit(1);

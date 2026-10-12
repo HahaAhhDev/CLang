@@ -12,6 +12,8 @@ pub struct Interp {
     scopes: Vec<HashMap<String, Value>>,
     funcs: HashMap<String, (Vec<String>, Vec<Stmt>, usize)>,
     pub printed: Vec<String>,
+    rng: u64,
+    cli: Vec<String>,
 }
 
 impl Interp {
@@ -20,7 +22,21 @@ impl Interp {
             scopes: vec![HashMap::new()],
             funcs: HashMap::new(),
             printed: Vec::new(),
+            rng: 0x12345678,
+            cli: Vec::new(),
         }
+    }
+
+    pub fn set_cli(&mut self, args: Vec<String>) {
+        self.cli = args;
+    }
+
+    fn next_rand(&mut self) -> u64 {
+        self.rng = self
+            .rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.rng >> 33) & 0x7fffffff
     }
 
     pub fn run_source(&mut self, src: &str) -> Result<(), ClangError> {
@@ -847,6 +863,292 @@ impl Interp {
                     )),
                 }
             }
+            "split" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Str(s), Value::Str(d)) => {
+                        if d.is_empty() {
+                            Ok(Value::List(s.chars().map(|c| Value::Str(c.to_string())).collect()))
+                        } else {
+                            Ok(Value::List(s.split(&d).map(|p| Value::Str(p.to_string())).collect()))
+                        }
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "split needs (text, sep)".to_string(),
+                        "call split(\"a,b\", \",\")".to_string(),
+                    )),
+                }
+            }
+            "join" => {
+                need_args(name, args, 2, line)?;
+                let base = self.eval(&args[0])?;
+                let sep = self.eval(&args[1])?;
+                match (base, sep) {
+                    (Value::List(v), Value::Str(d)) => {
+                        let mut parts = Vec::new();
+                        for x in v {
+                            parts.push(x.display());
+                        }
+                        Ok(Value::Str(parts.join(&d)))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "join needs (list, sep)".to_string(),
+                        "call join(parts, \",\")".to_string(),
+                    )),
+                }
+            }
+            "trim" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Str(s) => Ok(Value::Str(s.trim().to_string())),
+                    other => Err(bad_type(line, "trim", "string", other.type_name())),
+                }
+            }
+            "replace" => {
+                need_args(name, args, 3, line)?;
+                match (
+                    self.eval(&args[0])?,
+                    self.eval(&args[1])?,
+                    self.eval(&args[2])?,
+                ) {
+                    (Value::Str(s), Value::Str(a), Value::Str(b)) => {
+                        Ok(Value::Str(s.replace(&a, &b)))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "replace needs (text, old, new)".to_string(),
+                        "call replace(text, \"a\", \"b\")".to_string(),
+                    )),
+                }
+            }
+            "starts_with" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Str(s), Value::Str(p)) => Ok(Value::Bool(s.starts_with(&p))),
+                    _ => Err(ClangError::new(
+                        line,
+                        "starts_with needs (text, prefix)".to_string(),
+                        "call starts_with(text, \"hi\")".to_string(),
+                    )),
+                }
+            }
+            "ends_with" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Str(s), Value::Str(p)) => Ok(Value::Bool(s.ends_with(&p))),
+                    _ => Err(ClangError::new(
+                        line,
+                        "ends_with needs (text, suffix)".to_string(),
+                        "call ends_with(text, \"bye\")".to_string(),
+                    )),
+                }
+            }
+            "abs" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Num(n) => Ok(Value::Num(n.abs())),
+                    other => Err(bad_type(line, "abs", "number", other.type_name())),
+                }
+            }
+            "floor" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Num(n) => Ok(Value::Num(n.floor())),
+                    other => Err(bad_type(line, "floor", "number", other.type_name())),
+                }
+            }
+            "ceil" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Num(n) => Ok(Value::Num(n.ceil())),
+                    other => Err(bad_type(line, "ceil", "number", other.type_name())),
+                }
+            }
+            "sqrt" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Num(n) if n >= 0.0 => Ok(Value::Num(n.sqrt())),
+                    Value::Num(_) => Err(ClangError::new(
+                        line,
+                        "sqrt needs zero or more".to_string(),
+                        "guard negative inputs".to_string(),
+                    )),
+                    other => Err(bad_type(line, "sqrt", "number", other.type_name())),
+                }
+            }
+            "pow" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => Ok(Value::Num(a.powf(b))),
+                    _ => Err(ClangError::new(
+                        line,
+                        "pow needs (base, exp)".to_string(),
+                        "call pow(2, 8)".to_string(),
+                    )),
+                }
+            }
+            "min" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => Ok(Value::Num(a.min(b))),
+                    _ => Err(ClangError::new(
+                        line,
+                        "min needs two numbers".to_string(),
+                        "call min(a, b)".to_string(),
+                    )),
+                }
+            }
+            "max" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => Ok(Value::Num(a.max(b))),
+                    _ => Err(ClangError::new(
+                        line,
+                        "max needs two numbers".to_string(),
+                        "call max(a, b)".to_string(),
+                    )),
+                }
+            }
+            "time_now" => {
+                need_args(name, args, 0, line)?;
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as f64)
+                    .unwrap_or(0.0);
+                Ok(Value::Num(ms))
+            }
+            "sleep_ms" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Num(n) if n >= 0.0 && n <= 60000.0 => {
+                        std::thread::sleep(std::time::Duration::from_millis(n as u64));
+                        Ok(Value::Null)
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "sleep_ms needs 0 to 60000".to_string(),
+                        "call sleep_ms(50)".to_string(),
+                    )),
+                }
+            }
+            "env" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Str(k) => Ok(Value::Str(
+                        std::env::var(&k).unwrap_or_default(),
+                    )),
+                    other => Err(bad_type(line, "env", "string key", other.type_name())),
+                }
+            }
+            "cli_args" => {
+                need_args(name, args, 0, line)?;
+                Ok(Value::List(
+                    self.cli.iter().map(|s| Value::Str(s.clone())).collect(),
+                ))
+            }
+            "exec" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Str(cmd) => {
+                        let out = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&cmd)
+                            .output()
+                            .map_err(|e| {
+                                ClangError::new(
+                                    line,
+                                    format!("exec failed: {}", e),
+                                    "check the command text".to_string(),
+                                )
+                            })?;
+                        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+                        if !out.status.success() {
+                            let err = String::from_utf8_lossy(&out.stderr).to_string();
+                            return Err(ClangError::new(
+                                line,
+                                format!("command exited badly: {}", err.trim()),
+                                "run it in sh first".to_string(),
+                            ));
+                        }
+                        while text.ends_with('\n') || text.ends_with('\r') {
+                            text.pop();
+                        }
+                        Ok(Value::Str(text))
+                    }
+                    other => Err(bad_type(line, "exec", "string command", other.type_name())),
+                }
+            }
+            "rand_seed" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Num(n) => {
+                        self.rng = (n as u64) ^ 0x9e3779b97f4a7c15;
+                        if self.rng == 0 {
+                            self.rng = 0x12345678;
+                        }
+                        Ok(Value::Null)
+                    }
+                    other => Err(bad_type(line, "rand_seed", "number", other.type_name())),
+                }
+            }
+            "rand_int" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => {
+                        let lo = a as i64;
+                        let hi = b as i64;
+                        if lo > hi {
+                            return Err(ClangError::new(
+                                line,
+                                "rand_int needs min <= max".to_string(),
+                                "call rand_int(1, 10)".to_string(),
+                            ));
+                        }
+                        let span = (hi - lo + 1) as u64;
+                        let r = self.next_rand() % span;
+                        Ok(Value::Num((lo as u64 + r) as f64))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "rand_int needs (min, max)".to_string(),
+                        "call rand_int(1, 10)".to_string(),
+                    )),
+                }
+            }
+            "is_str" => {
+                need_args(name, args, 1, line)?;
+                Ok(Value::Bool(matches!(self.eval(&args[0])?, Value::Str(_))))
+            }
+            "is_num" => {
+                need_args(name, args, 1, line)?;
+                Ok(Value::Bool(matches!(self.eval(&args[0])?, Value::Num(_))))
+            }
+            "is_list" => {
+                need_args(name, args, 1, line)?;
+                Ok(Value::Bool(matches!(self.eval(&args[0])?, Value::List(_))))
+            }
+            "is_map" => {
+                need_args(name, args, 1, line)?;
+                Ok(Value::Bool(matches!(self.eval(&args[0])?, Value::Map(_))))
+            }
+            "type_of" => {
+                need_args(name, args, 1, line)?;
+                Ok(Value::Str(self.eval(&args[0])?.type_name().to_string()))
+            }
+            "keys" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Map(m) => {
+                        let mut ks: Vec<Value> =
+                            m.keys().map(|k| Value::Str(k.clone())).collect();
+                        ks.sort_by(|a, b| a.display().cmp(&b.display()));
+                        Ok(Value::List(ks))
+                    }
+                    other => Err(bad_type(line, "keys", "map", other.type_name())),
+                }
+            }
             "str" => {
                 need_args(name, args, 1, line)?;
                 Ok(Value::Str(self.eval(&args[0])?.display()))
@@ -1201,5 +1503,26 @@ mod tests {
         let out = run_ok(src);
         assert_eq!(out[0], "hi world");
         assert_eq!(out[1], "C:\\tmp");
+    }
+
+    #[test]
+    fn split_join_round_trip() {
+        let src = "var:parts = split(\"a,b,c\", \",\")\nvar:s = join(parts, \",\")\nemit(s)\nemit(len(parts))\n";
+        let out = run_ok(src);
+        assert_eq!(out, vec!["a,b,c", "3"]);
+    }
+
+    #[test]
+    fn strings_and_math_extras() {
+        let src = "emit(trim(\"  hi \"))\nemit(replace(\"aaa\", \"a\", \"b\"))\nemit(starts_with(\"hello\", \"he\"))\nemit(sqrt(16))\nemit(pow(2, 8))\nemit(min(3, 9))\n";
+        let out = run_ok(src);
+        assert_eq!(out, vec!["hi", "bbb", "true", "4", "256", "3"]);
+    }
+
+    #[test]
+    fn system_seed_and_types() {
+        let src = "rand_seed(7)\nvar:a = rand_int(1, 10)\nrand_seed(7)\nvar:b = rand_int(1, 10)\nemit(a == b)\nemit(type_of(a))\nemit(is_num(a))\nemit(is_str(\"x\"))\n";
+        let out = run_ok(src);
+        assert_eq!(out, vec!["true", "num", "true", "true"]);
     }
 }
