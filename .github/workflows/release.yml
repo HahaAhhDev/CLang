@@ -19,11 +19,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: upload unix binary
         if: matrix.os == 'ubuntu-latest'
-        run: gh release upload ${{ github.ref_name }} target/release/clng#clng-linux-x86_64 --clobber
+        run: cp target/release/clng clng-linux-x86_64 && gh release upload ${{ github.ref_name }} clng-linux-x86_64 --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: upload windows binary
         if: matrix.os == 'windows-latest'
-        run: gh release upload ${{ github.ref_name }} target/release/clng.exe#clng-windows-x86_64.exe --clobber
+        run: cp target/release/clng.exe clng-windows-x86_64.exe && gh release upload ${{ github.ref_name }} clng-windows-x86_64.exe --clobber
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
