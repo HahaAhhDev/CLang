@@ -31,6 +31,10 @@ Rules:
 
 ```
 clng app.clng
+clng -e 'emit(1 + 2)'
+clng - <<'EOF'
+emit("from stdin")
+EOF
 clng compile app.clng -o app.clngb
 clng compile --native app.clng -o app
 clng fmt app.clng

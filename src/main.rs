@@ -14,6 +14,8 @@ use interp::Interp;
 fn print_usage() {
     println!("usage:");
     println!("  clng <file.clng|file.clngb> [args...]   run a file");
+    println!("  clng -e 'emit(1)' [args...]         run inline code");
+    println!("  clng - [args...]                     run stdin, heredocs work");
     println!("  clng compile <file.clng> [-o out] [--native]  build it");
     println!("  clng fmt <file.clng>                    print canonical form");
     println!("  clng repl                               interactive loop");
@@ -337,6 +339,50 @@ fn main() {
     }
     if args[1] == "-h" || args[1] == "--help" {
         print_usage();
+        return;
+    }
+    if args[1] == "-e" || args[1] == "-c" {
+        if args.len() < 3 {
+            eprintln!("clang error at line 1: missing code after -e");
+            eprintln!("help: run clng -e 'emit(1)'");
+            std::process::exit(1);
+        }
+        let mut ip = Interp::new();
+        if std::env::var("CLNG_TRACE").unwrap_or_default() == "1" {
+            ip.trace = true;
+        }
+        if args.len() > 3 {
+            ip.set_cli(args[3..].to_vec());
+        }
+        if let Err(e) = ip.run_source(&args[2]) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args[1] == "-" {
+        use std::io::Read;
+        let mut src = String::new();
+        if std::io::stdin().read_to_string(&mut src).is_err() {
+            eprintln!("clang error at line 1: could not read stdin");
+            std::process::exit(1);
+        }
+        if src.trim().is_empty() {
+            eprintln!("clang error at line 1: stdin held no code");
+            eprintln!("help: pipe code in or use clng -e 'emit(1)'");
+            std::process::exit(1);
+        }
+        let mut ip = Interp::new();
+        if std::env::var("CLNG_TRACE").unwrap_or_default() == "1" {
+            ip.trace = true;
+        }
+        if args.len() > 2 {
+            ip.set_cli(args[2..].to_vec());
+        }
+        if let Err(e) = ip.run_source(&src) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
         return;
     }
     let path = args[1].clone();
