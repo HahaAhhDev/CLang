@@ -66,6 +66,69 @@ fn stmt_fmt(s: &Stmt, depth: usize, out: &mut String) -> Result<(), ClangError> 
             indent(depth, out);
             out.push_str("}\n");
         }
+        Stmt::Loop(c, body, _) => {
+            indent(depth, out);
+            out.push_str(&format!("loop({}) {{\n", expr_fmt(c)?));
+            for x in body {
+                stmt_fmt(x, depth + 1, out)?;
+            }
+            indent(depth, out);
+            out.push_str("}\n");
+        }
+        Stmt::Stop(_) => {
+            indent(depth, out);
+            out.push_str("stop\n");
+        }
+        Stmt::Skip(_) => {
+            indent(depth, out);
+            out.push_str("skip\n");
+        }
+        Stmt::Safe(a, b, _) => {
+            indent(depth, out);
+            out.push_str("safe {\n");
+            for x in a {
+                stmt_fmt(x, depth + 1, out)?;
+            }
+            indent(depth, out);
+            if b.is_empty() {
+                out.push_str("}\n");
+            } else {
+                out.push_str("} else {\n");
+                for x in b {
+                    stmt_fmt(x, depth + 1, out)?;
+                }
+                indent(depth, out);
+                out.push_str("}\n");
+            }
+        }
+        Stmt::Select(on, arms, els, _) => {
+            indent(depth, out);
+            out.push_str(&format!("select({}) {{\n", expr_fmt(on)?));
+            for (v, body) in arms {
+                indent(depth + 1, out);
+                out.push_str(&format!("is({}) {{\n", expr_fmt(v)?));
+                for x in body {
+                    stmt_fmt(x, depth + 2, out)?;
+                }
+                indent(depth + 1, out);
+                out.push_str("}\n");
+            }
+            if !els.is_empty() {
+                indent(depth + 1, out);
+                out.push_str("else {\n");
+                for x in els {
+                    stmt_fmt(x, depth + 2, out)?;
+                }
+                indent(depth + 1, out);
+                out.push_str("}\n");
+            }
+            indent(depth, out);
+            out.push_str("}\n");
+        }
+        Stmt::Unpack(names, e, _) => {
+            indent(depth, out);
+            out.push_str(&format!("var:[{}] = {}\n", names.join(", "), expr_fmt(e)?));
+        }
         Stmt::FuncDef(n, ps, body, _) => {
             indent(depth, out);
             if ps.len() <= 1 {
@@ -138,6 +201,7 @@ fn expr_fmt(e: &Expr) -> Result<String, ClangError> {
                 Op::Sub => "-",
                 Op::Mul => "*",
                 Op::Div => "/",
+                Op::Mod => "%",
                 Op::Eq => "==",
                 Op::Ne => "!=",
                 Op::Lt => "<",
@@ -148,6 +212,16 @@ fn expr_fmt(e: &Expr) -> Result<String, ClangError> {
             Ok(format!("{} {} {}", expr_fmt(l)?, mark, expr_fmt(r)?))
         }
         Expr::Neg(x, _) => Ok(format!("-{}", expr_fmt(x)?)),
+        Expr::Both(a, b, _) => Ok(format!("both({}, {})", expr_fmt(a)?, expr_fmt(b)?)),
+        Expr::Either(a, b, _) => Ok(format!("either({}, {})", expr_fmt(a)?, expr_fmt(b)?)),
+        Expr::Flip(x, _) => Ok(format!("flip({})", expr_fmt(x)?)),
+        Expr::Pick(c, a, b, _) => Ok(format!(
+            "pick({}, {}, {})",
+            expr_fmt(c)?,
+            expr_fmt(a)?,
+            expr_fmt(b)?
+        )),
+        Expr::Soft(x, _) => Ok(format!("soft({})", expr_fmt(x)?)),
     }
 }
 

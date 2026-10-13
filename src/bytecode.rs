@@ -35,6 +35,14 @@ pub enum Op {
     JumpIfFalse(usize),
     CallFn(usize, usize),
     CallBuiltin(String, usize),
+    Mod,
+    FlipTop,
+    MarkLoop,
+    UnmarkLoop,
+    StopTo(usize),
+    SkipTo(usize),
+    BadLoopCtl,
+    UnpackN(usize),
     PushToVar(String),
     Return,
     Pop,
@@ -84,6 +92,14 @@ const PURE_BUILTINS: &[&str] = &[
     "num",
     "empty_list",
     "assert",
+    "why",
+    "fdiv",
+    "size_of",
+    "band",
+    "bor",
+    "bxor",
+    "bnot",
+    "range",
     "rand_seed",
     "rand_int",
     "is_str",
@@ -142,6 +158,8 @@ fn compile_prog(prog: &[Stmt]) -> Result<Unit, FastError> {
             idx: &idx,
             globals: &globals,
             loops: 0,
+            breaks: Vec::new(),
+            conts: Vec::new(),
         };
         let code = cx.compile_body(body, true)?;
         funcs.push(BCFunc {
@@ -154,6 +172,8 @@ fn compile_prog(prog: &[Stmt]) -> Result<Unit, FastError> {
         idx: &idx,
         globals: &globals,
         loops: 0,
+            breaks: Vec::new(),
+            conts: Vec::new(),
     };
     let mut main_code: Vec<Op> = Vec::new();
     for s in prog {
@@ -177,6 +197,8 @@ struct Cx<'a> {
     idx: &'a HashMap<String, usize>,
     globals: &'a HashSet<String>,
     loops: usize,
+    breaks: Vec<Vec<usize>>,
+    conts: Vec<Vec<usize>>,
 }
 
 impl Cx<'_> {
@@ -316,6 +338,104 @@ impl Cx<'_> {
                 let end = code.len();
                 code[jend] = Op::JumpIfFalse(end);
             }
+            Stmt::Loop(c, body, _) => {
+                code.push(Op::MarkLoop);
+                let top = code.len();
+                self.compile_expr(c, code)?;
+                let jend = code.len();
+                code.push(Op::JumpIfFalse(0));
+                code.push(Op::EnterScope);
+                self.breaks.push(Vec::new());
+                self.conts.push(Vec::new());
+                for x in body {
+                    self.compile_stmt_mode(x, code, is_fn, is_main)?;
+                }
+                code.push(Op::ExitScope);
+                let cont = code.len();
+                code.push(Op::Jump(top));
+                let end = code.len();
+                code[jend] = Op::JumpIfFalse(end);
+                for at in self.breaks.pop().unwrap() {
+                    code[at] = Op::StopTo(end);
+                }
+                for at in self.conts.pop().unwrap() {
+                    code[at] = Op::SkipTo(cont);
+                }
+                code.push(Op::UnmarkLoop);
+            }
+            Stmt::Stop(line) => {
+                code.push(Op::SetLine(*line));
+                if self.breaks.is_empty() {
+                    code.push(Op::BadLoopCtl);
+                } else {
+                    let at = code.len();
+                    code.push(Op::StopTo(0));
+                    self.breaks.last_mut().unwrap().push(at);
+                }
+            }
+            Stmt::Skip(line) => {
+                code.push(Op::SetLine(*line));
+                if self.conts.is_empty() {
+                    code.push(Op::BadLoopCtl);
+                } else {
+                    let at = code.len();
+                    code.push(Op::SkipTo(0));
+                    self.conts.last_mut().unwrap().push(at);
+                }
+            }
+            Stmt::Safe(_, _, line) => {
+                let _ = line;
+                return Err(self.unsupported("safe block".to_string()));
+            }
+            Stmt::Select(on, arms, els, line) => {
+                code.push(Op::SetLine(*line));
+                let id = self.loops;
+                self.loops += 1;
+                let sel = format!("#sel{}", id);
+                self.compile_expr(on, code)?;
+                code.push(Op::Store(sel.clone()));
+                let mut ends: Vec<usize> = Vec::new();
+                for (v, body) in arms {
+                    code.push(Op::Load(sel.clone()));
+                    self.compile_expr(v, code)?;
+                    code.push(Op::Eq);
+                    let jnext = code.len();
+                    code.push(Op::JumpIfFalse(0));
+                    code.push(Op::EnterScope);
+                    for x in body {
+                        self.compile_stmt_mode(x, code, is_fn, is_main)?;
+                    }
+                    code.push(Op::ExitScope);
+                    ends.push(code.len());
+                    code.push(Op::Jump(0));
+                    let nxt = code.len();
+                    code[jnext] = Op::JumpIfFalse(nxt);
+                }
+                if !els.is_empty() {
+                    code.push(Op::EnterScope);
+                    for x in els {
+                        self.compile_stmt_mode(x, code, is_fn, is_main)?;
+                    }
+                    code.push(Op::ExitScope);
+                }
+                let end = code.len();
+                for at in ends {
+                    code[at] = Op::Jump(end);
+                }
+            }
+            Stmt::Unpack(names, e, line) => {
+                code.push(Op::SetLine(*line));
+                self.compile_expr(e, code)?;
+                code.push(Op::UnpackN(names.len()));
+                for n in names.iter().rev() {
+                    if is_main && self.globals.contains(n) {
+                        code.push(Op::StoreGlobal(n.clone()));
+                    } else {
+                        code.push(Op::Store(n.clone()));
+                    }
+                }
+                let _ = line;
+            }
             Stmt::FuncDef(..) => {}
         }
         Ok(())
@@ -380,6 +500,56 @@ impl Cx<'_> {
                     }
                 }
             }
+            Expr::Both(a, b, _) => {
+                self.compile_expr(a, code)?;
+                let jf = code.len();
+                code.push(Op::JumpIfFalse(0));
+                self.compile_expr(b, code)?;
+                code.push(Op::FlipTop);
+                code.push(Op::FlipTop);
+                let je = code.len();
+                code.push(Op::Jump(0));
+                let fl = code.len();
+                code[jf] = Op::JumpIfFalse(fl);
+                code.push(Op::Push(Value::Bool(false)));
+                let end = code.len();
+                code[je] = Op::Jump(end);
+            }
+            Expr::Either(a, b, _) => {
+                self.compile_expr(a, code)?;
+                let jf = code.len();
+                code.push(Op::JumpIfFalse(0));
+                code.push(Op::Push(Value::Bool(true)));
+                let je = code.len();
+                code.push(Op::Jump(0));
+                let el = code.len();
+                code[jf] = Op::JumpIfFalse(el);
+                self.compile_expr(b, code)?;
+                code.push(Op::FlipTop);
+                code.push(Op::FlipTop);
+                let end = code.len();
+                code[je] = Op::Jump(end);
+            }
+            Expr::Flip(x, _) => {
+                self.compile_expr(x, code)?;
+                code.push(Op::FlipTop);
+            }
+            Expr::Pick(c, a, b, _) => {
+                self.compile_expr(c, code)?;
+                let jf = code.len();
+                code.push(Op::JumpIfFalse(0));
+                self.compile_expr(a, code)?;
+                let je = code.len();
+                code.push(Op::Jump(0));
+                let el = code.len();
+                code[jf] = Op::JumpIfFalse(el);
+                self.compile_expr(b, code)?;
+                let end = code.len();
+                code[je] = Op::Jump(end);
+            }
+            Expr::Soft(_, _) => {
+                return Err(self.unsupported("soft call".to_string()));
+            }
             Expr::Attr(o, f, _) => {
                 self.compile_expr(o, code)?;
                 code.push(Op::Attr(f.clone()));
@@ -410,6 +580,7 @@ impl Cx<'_> {
                     AOp::Sub => Op::Sub,
                     AOp::Mul => Op::Mul,
                     AOp::Div => Op::Div,
+                    AOp::Mod => Op::Mod,
                     AOp::Eq => Op::Eq,
                     AOp::Ne => Op::Ne,
                     AOp::Lt => Op::Lt,
@@ -497,6 +668,7 @@ struct VM {
     globals: HashMap<String, Value>,
     printed: Vec<String>,
     trace_log: Vec<String>,
+    loop_marks: Vec<usize>,
     trace: bool,
     quiet: bool,
     rng: u64,
@@ -522,6 +694,7 @@ fn exec_unit(
         globals: HashMap::new(),
         printed: Vec::new(),
         trace_log: Vec::new(),
+        loop_marks: Vec::new(),
         trace,
         quiet,
         rng: 0x12345678,
@@ -792,6 +965,105 @@ fn run_vm(vm: &mut VM) -> Result<(), ClangError> {
                 let c = pop(vm)?;
                 if !c.is_truthy() {
                     vm.frames.last_mut().unwrap().ip = t;
+                }
+            }
+            Op::Mod => {
+                let b = pop(vm)?;
+                let a = pop(vm)?;
+                match (a, b) {
+                    (Value::Num(_), Value::Num(y)) if y == 0.0 => {
+                        return Err(vm_err(
+                            vm,
+                            "modulo by zero".to_string(),
+                            "guard with if(b == 0) before mod".to_string(),
+                        ))
+                    }
+                    (Value::Num(x), Value::Num(y)) => vm.stack.push(Value::Num(x % y)),
+                    (x, y) => {
+                        return Err(vm_err(
+                            vm,
+                            format!("cannot mod {} and {}", x.type_name(), y.type_name()),
+                            "use % only on numbers".to_string(),
+                        ))
+                    }
+                }
+            }
+            Op::FlipTop => {
+                let a = pop(vm)?;
+                vm.stack.push(Value::Bool(!a.is_truthy()));
+            }
+            Op::MarkLoop => {
+                let d = vm.frames.last().unwrap().scopes.len();
+                vm.loop_marks.push(d);
+            }
+            Op::UnmarkLoop => {
+                vm.loop_marks.pop();
+            }
+            Op::StopTo(t) => {
+                match vm.loop_marks.last() {
+                    Some(d) => {
+                        let fr = vm.frames.last_mut().unwrap();
+                        while fr.scopes.len() > *d {
+                            fr.scopes.pop();
+                        }
+                        fr.ip = t;
+                    }
+                    None => {
+                        return Err(vm_err(
+                            vm,
+                            "stop sits outside any loop".to_string(),
+                            "use stop only inside loop(c) { ... }".to_string(),
+                        ))
+                    }
+                }
+            }
+            Op::SkipTo(t) => {
+                match vm.loop_marks.last() {
+                    Some(d) => {
+                        let fr = vm.frames.last_mut().unwrap();
+                        while fr.scopes.len() > *d {
+                            fr.scopes.pop();
+                        }
+                        fr.ip = t;
+                    }
+                    None => {
+                        return Err(vm_err(
+                            vm,
+                            "skip sits outside any loop".to_string(),
+                            "use skip only inside loop(c) { ... }".to_string(),
+                        ))
+                    }
+                }
+            }
+            Op::BadLoopCtl => {
+                return Err(vm_err(
+                    vm,
+                    "stop sits outside any loop".to_string(),
+                    "use stop only inside loop(c) { ... }".to_string(),
+                ))
+            }
+            Op::UnpackN(n) => {
+                let v = pop(vm)?;
+                match v {
+                    Value::List(items) => {
+                        if items.len() != n {
+                            return Err(vm_err(
+                                vm,
+                                format!("unpack wants {} values but got {}", n, items.len()),
+                                "match the names to the list length".to_string(),
+                            ));
+                        }
+                        for item in items {
+                            vm.stack.push(item);
+                        }
+                    }
+                    other => {
+                        return Err(vm_err(
+                            vm,
+                            format!("unpack needs a list, got {}", other.type_name()),
+                            "write var:[a, b] = pair".to_string(),
+                        ))
+                    }
                 }
             }
             Op::CallFn(i, argc) => {
@@ -1291,6 +1563,98 @@ fn call_builtin(vm: &mut VM, name: &str, args: Vec<Value>) -> Result<Value, Clan
             want(0)?;
             Ok(Value::List(Vec::new()))
         }
+        "why" => {
+            want(0)?;
+            Ok(Value::Str(String::new()))
+        }
+        "fdiv" => {
+            want(2)?;
+            match (&args[0], &args[1]) {
+                (Value::Num(_), Value::Num(y)) if *y == 0.0 => Err(ClangError::new(
+                    line,
+                    "division by zero".to_string(),
+                    "guard with if(b == 0) before dividing".to_string(),
+                )),
+                (Value::Num(x), Value::Num(y)) => Ok(Value::Num((x / y).floor())),
+                _ => Err(ClangError::new(line, "fdiv needs two numbers".to_string(), "call fdiv(7, 2)".to_string())),
+            }
+        }
+        "size_of" => {
+            want(1)?;
+            match &args[0] {
+                Value::Str(s) => Ok(Value::Num(s.len() as f64)),
+                Value::List(v) => Ok(Value::Num(v.len() as f64)),
+                Value::Map(m) => Ok(Value::Num(m.len() as f64)),
+                Value::Num(_) => Ok(Value::Num(8.0)),
+                Value::Bool(_) => Ok(Value::Num(1.0)),
+                Value::Null => Ok(Value::Num(0.0)),
+            }
+        }
+        "band" => {
+            want(2)?;
+            match (&args[0], &args[1]) {
+                (Value::Num(a), Value::Num(b)) => Ok(Value::Num(((*a as i64) & (*b as i64)) as f64)),
+                _ => Err(ClangError::new(line, "band needs two numbers".to_string(), "call band(6, 3)".to_string())),
+            }
+        }
+        "bor" => {
+            want(2)?;
+            match (&args[0], &args[1]) {
+                (Value::Num(a), Value::Num(b)) => Ok(Value::Num(((*a as i64) | (*b as i64)) as f64)),
+                _ => Err(ClangError::new(line, "bor needs two numbers".to_string(), "call bor(6, 3)".to_string())),
+            }
+        }
+        "bxor" => {
+            want(2)?;
+            match (&args[0], &args[1]) {
+                (Value::Num(a), Value::Num(b)) => Ok(Value::Num(((*a as i64) ^ (*b as i64)) as f64)),
+                _ => Err(ClangError::new(line, "bxor needs two numbers".to_string(), "call bxor(6, 3)".to_string())),
+            }
+        }
+        "bnot" => {
+            want(1)?;
+            match &args[0] {
+                Value::Num(a) => Ok(Value::Num(!(*a as i64) as f64)),
+                other => Err(ClangError::new(
+                    line,
+                    format!("bnot needs a number, got {}", other.type_name()),
+                    "call bnot(6)".to_string(),
+                )),
+            }
+        }
+        "range" => {
+            want(2)?;
+            match (&args[0], &args[1]) {
+                (Value::Num(a), Value::Num(b)) => {
+                    let (mut lo, hi) = (*a as i64, *b as i64);
+                    if (hi - lo).abs() > 100000 {
+                        return Err(ClangError::new(
+                            line,
+                            "range is too wide".to_string(),
+                            "keep it under 100000 items".to_string(),
+                        ));
+                    }
+                    let mut out = Vec::new();
+                    if lo <= hi {
+                        while lo < hi {
+                            out.push(Value::Num(lo as f64));
+                            lo += 1;
+                        }
+                    } else {
+                        while lo > hi {
+                            out.push(Value::Num(lo as f64));
+                            lo -= 1;
+                        }
+                    }
+                    Ok(Value::List(out))
+                }
+                _ => Err(ClangError::new(
+                    line,
+                    "range needs (start, end)".to_string(),
+                    "call range(0, 5)".to_string(),
+                )),
+            }
+        }
         "assert" => {
             if args.len() != 1 && args.len() != 2 {
                 return Err(ClangError::new(
@@ -1448,6 +1812,31 @@ mod tests {
         let (a, b) = both(src);
         assert_eq!(a, b);
         assert_eq!(a, vec!["2", "true"]);
+    }
+
+    #[test]
+    fn parity_flow_forms() {
+        let src = "var:i = 0\nvar:tot = 0\nloop(both(i < 5, true)) {\n var:i = i + 1\n if(i % 2 == 0) {\n skip\n }\n var:tot = tot + i\n}\nemit(tot)\nvar:[a, b] = [7, 8]\nemit(pick(a > b, a, b))\nselect(b) {\n is(7) {\n emit(\"seven\")\n }\n else {\n emit(\"other\")\n }\n}\n";
+        let (a, out) = both(src);
+        assert_eq!(a, out);
+        assert_eq!(a, vec!["9", "8", "other"]);
+    }
+
+    #[test]
+    fn flow_io_falls_back() {
+        for src in [
+            "safe {\n emit(1)\n}\n",
+            "var:x = soft(missing)\n",
+            "emit(keep([1], \"f\"))\n",
+        ] {
+            let mut p = Parser::new(src);
+            let prog = p.parse_program().expect("parses");
+            assert!(
+                matches!(super::try_run(&prog, Vec::new()), Err(super::FastError::Unsupported(_))),
+                "should fall back: {}",
+                src
+            );
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub enum Op {
     Sub,
     Mul,
     Div,
+    Mod,
     Eq,
     Ne,
     Lt,
@@ -38,6 +39,11 @@ pub enum Expr {
     },
     BinOp(Box<Expr>, Op, Box<Expr>, usize),
     Neg(Box<Expr>, usize),
+    Both(Box<Expr>, Box<Expr>, usize),
+    Either(Box<Expr>, Box<Expr>, usize),
+    Flip(Box<Expr>, usize),
+    Pick(Box<Expr>, Box<Expr>, Box<Expr>, usize),
+    Soft(Box<Expr>, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +55,12 @@ pub enum Stmt {
     Run(String, usize),
     If(Expr, Vec<Stmt>, Vec<Stmt>, usize),
     For(String, Expr, Vec<Stmt>, usize),
+    Loop(Expr, Vec<Stmt>, usize),
+    Stop(usize),
+    Skip(usize),
+    Safe(Vec<Stmt>, Vec<Stmt>, usize),
+    Select(Expr, Vec<(Expr, Vec<Stmt>)>, Vec<Stmt>, usize),
+    Unpack(Vec<String>, Expr, usize),
     FuncDef(String, Vec<String>, Vec<Stmt>, usize),
 }
 
@@ -205,6 +217,43 @@ impl Parser {
 
         if self.peek_slice("var:") {
             self.consume_word("var:")?;
+            self.skip_space();
+            if self.peek() == Some('[') {
+                self.next();
+                let mut names = Vec::new();
+                loop {
+                    self.skip_space();
+                    if self.peek() == Some(']') {
+                        self.next();
+                        break;
+                    }
+                    names.push(self.parse_ident()?);
+                    self.skip_space();
+                    if self.peek() == Some(',') {
+                        self.next();
+                        continue;
+                    }
+                    self.skip_space();
+                    if self.peek() == Some(']') {
+                        self.next();
+                        break;
+                    }
+                    return Err(self.err(
+                        "expected ',' or ']' in unpack list".to_string(),
+                        "write var:[a, b] = pair".to_string(),
+                    ));
+                }
+                if names.len() < 2 {
+                    return Err(self.err(
+                        "unpack needs at least two names".to_string(),
+                        "write var:[a, b] = pair".to_string(),
+                    ));
+                }
+                self.skip_space();
+                self.expect_char('=', "'=' after unpack list")?;
+                let e = self.parse_expr()?;
+                return Ok(Stmt::Unpack(names, e, line));
+            }
             let name = self.parse_ident()?;
             self.skip_space();
             self.expect_char('=', "'=' after variable name")?;
@@ -285,6 +334,83 @@ impl Parser {
             }
             let body = self.parse_block()?;
             return Ok(Stmt::For(var, iter, body, line));
+        }
+        if w == "loop" {
+            self.consume_word("loop")?;
+            self.skip_space();
+            self.expect_char('(', "'(' after loop")?;
+            let cond = self.parse_expr()?;
+            self.expect_char(')', "')' to close loop condition")?;
+            let body = self.parse_block()?;
+            return Ok(Stmt::Loop(cond, body, line));
+        }
+        if w == "stop" {
+            self.consume_word("stop")?;
+            return Ok(Stmt::Stop(line));
+        }
+        if w == "skip" {
+            self.consume_word("skip")?;
+            return Ok(Stmt::Skip(line));
+        }
+        if w == "safe" {
+            self.consume_word("safe")?;
+            let then_b = self.parse_block()?;
+            self.skip_space();
+            let mut else_b = Vec::new();
+            if self.peek_word() == "else" {
+                self.consume_word("else")?;
+                else_b = self.parse_block()?;
+            }
+            return Ok(Stmt::Safe(then_b, else_b, line));
+        }
+        if w == "select" {
+            self.consume_word("select")?;
+            self.skip_space();
+            self.expect_char('(', "'(' after select")?;
+            let on = self.parse_expr()?;
+            self.expect_char(')', "')' to close select value")?;
+            self.skip_space();
+            self.expect_char('{', "'{' to open select arms")?;
+            let mut arms: Vec<(Expr, Vec<Stmt>)> = Vec::new();
+            let mut else_b = Vec::new();
+            loop {
+                self.skip_space();
+                if self.eof() {
+                    return Err(self.err(
+                        "select was never closed".to_string(),
+                        "add a matching '}'".to_string(),
+                    ));
+                }
+                if self.peek() == Some('}') {
+                    self.next();
+                    break;
+                }
+                let kw = self.peek_word();
+                if kw == "is" {
+                    self.consume_word("is")?;
+                    self.skip_space();
+                    self.expect_char('(', "'(' after is")?;
+                    let v = self.parse_expr()?;
+                    self.expect_char(')', "')' to close is value")?;
+                    let body = self.parse_block()?;
+                    arms.push((v, body));
+                } else if kw == "else" {
+                    self.consume_word("else")?;
+                    else_b = self.parse_block()?;
+                } else {
+                    return Err(self.err(
+                        "select arms start with is(v) or else".to_string(),
+                        "write is(1) { ... } else { ... }".to_string(),
+                    ));
+                }
+            }
+            if arms.is_empty() {
+                return Err(self.err(
+                    "select needs at least one is arm".to_string(),
+                    "write select(x) { is(1) { ... } }".to_string(),
+                ));
+            }
+            return Ok(Stmt::Select(on, arms, else_b, line));
         }
 
         if self.is_assign_ahead() {
@@ -546,6 +672,10 @@ impl Parser {
                 self.next();
                 let right = self.parse_unary()?;
                 left = Expr::BinOp(Box::new(left), Op::Div, Box::new(right), line);
+            } else if self.peek() == Some('%') {
+                self.next();
+                let right = self.parse_unary()?;
+                left = Expr::BinOp(Box::new(left), Op::Mod, Box::new(right), line);
             } else {
                 break;
             }
@@ -694,6 +824,15 @@ impl Parser {
                     return Ok(Expr::Null(line));
                 }
                 self.skip_space();
+                if self.peek() == Some('(')
+                    && (name == "both"
+                        || name == "either"
+                        || name == "flip"
+                        || name == "pick"
+                        || name == "soft")
+                {
+                    return self.parse_lazy(&name, line);
+                }
                 if self.peek() == Some('(') {
                     self.next();
                     let mut args = Vec::new();
@@ -865,6 +1004,72 @@ impl Parser {
         })
     }
 
+    fn parse_lazy(&mut self, name: &str, line: usize) -> Result<Expr, ClangError> {
+        self.next();
+        let mut args = Vec::new();
+        loop {
+            self.skip_space();
+            if self.peek() == Some(')') {
+                self.next();
+                break;
+            }
+            if self.eof() {
+                return Err(self.err(
+                    format!("{} was never closed", name),
+                    "add a matching ')'".to_string(),
+                ));
+            }
+            args.push(self.parse_expr()?);
+            self.skip_space();
+            if self.peek() == Some(',') {
+                self.next();
+                continue;
+            }
+            self.skip_space();
+            if self.peek() == Some(')') {
+                self.next();
+                break;
+            }
+            return Err(self.err(
+                "expected ',' or ')' here".to_string(),
+                format!("check {} near line {}", name, line),
+            ));
+        }
+        let arity = match name {
+            "both" | "either" => 2,
+            "flip" | "soft" => 1,
+            "pick" => 3,
+            _ => 0,
+        };
+        if args.len() != arity {
+            return Err(self.err(
+                format!("{} wants {} inputs but got {}", name, arity, args.len()),
+                format!("check {} near line {}", name, line),
+            ));
+        }
+        let mut it = args.into_iter();
+        match name {
+            "both" => Ok(Expr::Both(
+                Box::new(it.next().unwrap()),
+                Box::new(it.next().unwrap()),
+                line,
+            )),
+            "either" => Ok(Expr::Either(
+                Box::new(it.next().unwrap()),
+                Box::new(it.next().unwrap()),
+                line,
+            )),
+            "flip" => Ok(Expr::Flip(Box::new(it.next().unwrap()), line)),
+            "pick" => Ok(Expr::Pick(
+                Box::new(it.next().unwrap()),
+                Box::new(it.next().unwrap()),
+                Box::new(it.next().unwrap()),
+                line,
+            )),
+            _ => Ok(Expr::Soft(Box::new(it.next().unwrap()), line)),
+        }
+    }
+
     fn parse_number(&mut self) -> Result<Expr, ClangError> {
         let line = self.line;
         let mut s = String::new();
@@ -911,6 +1116,11 @@ impl Parser {
             Expr::Slice { line, .. } => *line,
             Expr::BinOp(_, _, _, l) => *l,
             Expr::Neg(_, l) => *l,
+            Expr::Both(_, _, l)
+            | Expr::Either(_, _, l)
+            | Expr::Flip(_, l)
+            | Expr::Pick(_, _, _, l)
+            | Expr::Soft(_, l) => *l,
         }
     }
 }

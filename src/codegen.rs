@@ -23,6 +23,10 @@ pub const NATIVE_UNSUPPORTED: &[&str] = &[
     "mk_user",
     "sort",
     "push",
+    "keep",
+    "conv",
+    "safe",
+    "soft",
 ];
 
 const RUNTIME: &str = r#"
@@ -127,6 +131,17 @@ fn v_mul(a: V, b: V) -> V {
             let k = (*n as i64).max(0).min(10000) as usize;
             V::Str(s.repeat(k))
         }
+        _ => V::Null,
+    }
+}
+
+fn v_mod(a: V, b: V) -> V {
+    match (a, b) {
+        (V::Num(_), V::Num(y)) if y == 0.0 => {
+            eprintln!("clang error at line 1: modulo by zero");
+            std::process::exit(1);
+        }
+        (V::Num(x), V::Num(y)) => V::Num(x % y),
         _ => V::Null,
     }
 }
@@ -329,6 +344,39 @@ fn b_assert(a: &V, msg: &V) -> V {
     V::Null
 }
 
+fn b_range(a: &V, b: &V) -> V {
+    let (lo, hi) = match (a, b) {
+        (V::Num(x), V::Num(y)) => (*x as i64, *y as i64),
+        _ => return V::Null,
+    };
+    let mut out = Vec::new();
+    if lo <= hi {
+        let mut n = lo;
+        while n < hi && out.len() < 100000 {
+            out.push(V::Num(n as f64));
+            n += 1;
+        }
+    } else {
+        let mut n = lo;
+        while n > hi && out.len() < 100000 {
+            out.push(V::Num(n as f64));
+            n -= 1;
+        }
+    }
+    V::List(out)
+}
+
+fn b_size_of(a: &V) -> V {
+    match a {
+        V::Str(s) => V::Num(s.len() as f64),
+        V::List(v) => V::Num(v.len() as f64),
+        V::Map(m) => V::Num(m.len() as f64),
+        V::Num(_) => V::Num(8.0),
+        V::Bool(_) => V::Num(1.0),
+        V::Null => V::Num(0.0),
+    }
+}
+
 fn b_num(a: &V) -> V {
     match a {
         V::Num(n) => V::Num(*n),
@@ -408,6 +456,35 @@ fn collect_calls(s: &Stmt, acc: &mut Vec<String>) {
                 collect_calls(x, acc);
             }
         }
+        Stmt::Loop(cond, body, _) => {
+            collect_expr(cond, acc);
+            for x in body {
+                collect_calls(x, acc);
+            }
+        }
+        Stmt::Safe(a, b, _) => {
+            acc.push("safe".to_string());
+            for x in a {
+                collect_calls(x, acc);
+            }
+            for x in b {
+                collect_calls(x, acc);
+            }
+        }
+        Stmt::Select(on, arms, els, _) => {
+            collect_expr(on, acc);
+            for (v, body) in arms {
+                collect_expr(v, acc);
+                for x in body {
+                    collect_calls(x, acc);
+                }
+            }
+            for x in els {
+                collect_calls(x, acc);
+            }
+        }
+        Stmt::Unpack(_, e, _) => collect_expr(e, acc),
+        Stmt::Stop(_) | Stmt::Skip(_) => {}
         Stmt::FuncDef(_, _, body, _) => {
             for x in body {
                 collect_calls(x, acc);
@@ -429,6 +506,16 @@ fn collect_expr(e: &Expr, acc: &mut Vec<String>) {
             collect_expr(r, acc);
         }
         Expr::Neg(x, _) => collect_expr(x, acc),
+        Expr::Both(a, b, _) | Expr::Either(a, b, _) => {
+            collect_expr(a, acc);
+            collect_expr(b, acc);
+        }
+        Expr::Flip(x, _) | Expr::Soft(x, _) => collect_expr(x, acc),
+        Expr::Pick(x, a, b, _) => {
+            collect_expr(x, acc);
+            collect_expr(a, acc);
+            collect_expr(b, acc);
+        }
         Expr::Attr(o, _, _) => collect_expr(o, acc),
         Expr::Index(o, i, _) => {
             collect_expr(o, acc);
@@ -524,6 +611,26 @@ fn expr_rust(e: &Expr, locals: &HashSet<String>, globals: &HashSet<String>) -> R
                 "str" => Ok(format!("b_str(&{})", parts[0])),
                 "num" => Ok(format!("b_num(&{})", parts[0])),
                 "empty_list" => Ok("V::List(vec![])".to_string()),
+                "why" => Ok("V::Str(String::new())".to_string()),
+                "fdiv" => Ok(format!(
+                    "V::Num((v_num(&{}) / v_num(&{})).floor())",
+                    parts[0], parts[1]
+                )),
+                "size_of" => Ok(format!("b_size_of(&{})", parts[0])),
+                "band" => Ok(format!(
+                    "V::Num(((v_num(&{}) as i64) & (v_num(&{}) as i64)) as f64)",
+                    parts[0], parts[1]
+                )),
+                "bor" => Ok(format!(
+                    "V::Num(((v_num(&{}) as i64) | (v_num(&{}) as i64)) as f64)",
+                    parts[0], parts[1]
+                )),
+                "bxor" => Ok(format!(
+                    "V::Num(((v_num(&{}) as i64) ^ (v_num(&{}) as i64)) as f64)",
+                    parts[0], parts[1]
+                )),
+                "bnot" => Ok(format!("V::Num(!(v_num(&{}) as i64) as f64)", parts[0])),
+                "range" => Ok(format!("b_range(&{}, &{})", parts[0], parts[1])),
                 "assert" => {
                     if parts.len() == 1 {
                         Ok(format!(
@@ -540,6 +647,34 @@ fn expr_rust(e: &Expr, locals: &HashSet<String>, globals: &HashSet<String>) -> R
                 }
             }
         }
+        Expr::Both(a, b, _) => {
+            let x = expr_rust(a, locals, globals)?;
+            let y = expr_rust(b, locals, globals)?;
+            Ok(format!("V::Bool(truthy(&({})) && truthy(&({})))", x, y))
+        }
+        Expr::Either(a, b, _) => {
+            let x = expr_rust(a, locals, globals)?;
+            let y = expr_rust(b, locals, globals)?;
+            Ok(format!("V::Bool(truthy(&({})) || truthy(&({})))", x, y))
+        }
+        Expr::Flip(x, _) => {
+            let v = expr_rust(x, locals, globals)?;
+            Ok(format!("V::Bool(!truthy(&({})))", v))
+        }
+        Expr::Pick(cond, a, b, _) => {
+            let c = expr_rust(cond, locals, globals)?;
+            let x = expr_rust(a, locals, globals)?;
+            let y = expr_rust(b, locals, globals)?;
+            Ok(format!(
+                "({} {{ let _c: V = {}; if truthy(&_c) {{ {} }} else {{ {} }} }})",
+                "{", c, x, y
+            ))
+        }
+        Expr::Soft(_, line) => Err(ClangError::new(
+            *line,
+            "soft needs the interpreter".to_string(),
+            "use plain compile for this file".to_string(),
+        )),
         Expr::Attr(o, f, _) => {
             let base = expr_rust(o, locals, globals)?;
             Ok(format!("v_field(&({}), {})", base, rust_str(f)))
@@ -570,6 +705,7 @@ fn expr_rust(e: &Expr, locals: &HashSet<String>, globals: &HashSet<String>) -> R
                 Op::Sub => format!("v_sub(({a}), ({b}))", a = a, b = b),
                 Op::Mul => format!("v_mul(({a}), ({b}))", a = a, b = b),
                 Op::Div => format!("v_div(({a}), ({b}))", a = a, b = b),
+                Op::Mod => format!("v_mod(({a}), ({b}))", a = a, b = b),
                 Op::Eq => format!("V::Bool(v_eq(&({a}), &({b})))", a = a, b = b),
                 Op::Ne => format!("V::Bool(!v_eq(&({a}), &({b})))", a = a, b = b),
                 Op::Lt => format!("V::Bool(v_lt(&({a}), &({b})))", a = a, b = b),
@@ -723,6 +859,45 @@ fn gen_stmt_fn(
             s.push_str("} \n");
             Ok(s)
         }
+        Stmt::Loop(cond, body, _) => {
+            let c = expr_rust(cond, locals, globals)?;
+            let mut s = format!("while truthy(&({})) {{ \n", c);
+            let mut lb = locals.clone();
+            for x in body {
+                s.push_str(&gen_stmt_fn(x, &mut lb, globals, params)?);
+            }
+            s.push_str("} \n");
+            Ok(s)
+        }
+        Stmt::Stop(_) => Ok("break; \n".to_string()),
+        Stmt::Skip(_) => Ok("continue; \n".to_string()),
+        Stmt::Safe(_, _, line) => Err(ClangError::new(
+            *line,
+            "safe needs the interpreter".to_string(),
+            "use plain compile for this file".to_string(),
+        )),
+        Stmt::Select(on, arms, els, line) => {
+            let _ = line;
+            gen_select(on, arms, els, locals, globals, &mut |x, lb| {
+                gen_stmt_fn(x, lb, globals, params)
+            })
+        }
+        Stmt::Unpack(names, e, _) => {
+            let v = expr_rust(e, locals, globals)?;
+            let mut s = format!("let _up = {}; \n", v);
+            for (i, n) in names.iter().enumerate() {
+                let get = format!("v_index(&(_up.clone()), &V::Num({} as f64))", i);
+                if locals.contains(n) || params.contains(n) {
+                    s.push_str(&format!("{} = {}; \n", n, get));
+                } else if globals.contains(n) {
+                    s.push_str(&format!("g_set({}, {}); \n", rust_str(n), get));
+                } else {
+                    locals.insert(n.clone());
+                    s.push_str(&format!("let mut {} = {}; \n", n, get));
+                }
+            }
+            Ok(s)
+        }
         Stmt::FuncDef(..) => Ok(String::new()),
     }
 }
@@ -786,8 +961,75 @@ fn gen_stmt_main(
             s.push_str("} \n");
             Ok(s)
         }
+        Stmt::Loop(cond, body, _) => {
+            let cc = expr_rust(cond, locals, globals)?;
+            let mut s = format!("while truthy(&({})) {{ \n", cc);
+            let mut lb = locals.clone();
+            for x in body {
+                s.push_str(&gen_stmt_main(x, &mut lb, globals)?);
+            }
+            s.push_str("} \n");
+            Ok(s)
+        }
+        Stmt::Stop(_) => Ok("break; \n".to_string()),
+        Stmt::Skip(_) => Ok("continue; \n".to_string()),
+        Stmt::Safe(_, _, line) => Err(ClangError::new(
+            *line,
+            "safe needs the interpreter".to_string(),
+            "use plain compile for this file".to_string(),
+        )),
+        Stmt::Select(on, arms, els, line) => {
+            let _ = line;
+            gen_select(on, arms, els, locals, globals, &mut |x, lb| {
+                gen_stmt_main(x, lb, globals)
+            })
+        }
+        Stmt::Unpack(names, e, _) => {
+            let v = expr_rust(e, locals, globals)?;
+            let mut s = format!("let _up = {}; \n", v);
+            for (i, n) in names.iter().enumerate() {
+                let get = format!("v_index(&(_up.clone()), &V::Num({} as f64))", i);
+                s.push_str(&format!("g_set({}, {}); \n", rust_str(n), get));
+            }
+            Ok(s)
+        }
         Stmt::FuncDef(..) => Ok(String::new()),
     }
+}
+
+fn gen_select(
+    on: &Expr,
+    arms: &[(Expr, Vec<Stmt>)],
+    els: &[Stmt],
+    locals: &mut HashSet<String>,
+    globals: &HashSet<String>,
+    emit: &mut dyn FnMut(&Stmt, &mut HashSet<String>) -> Result<String, ClangError>,
+) -> Result<String, ClangError> {
+    let target = expr_rust(on, locals, globals)?;
+    let mut s = String::new();
+    for (i, (v, body)) in arms.iter().enumerate() {
+        let vv = expr_rust(v, locals, globals)?;
+        if i == 0 {
+            s.push_str(&format!("if v_eq(&({}), &({})) {{ \n", target, vv));
+        } else {
+            s.push_str(&format!("}} else if v_eq(&({}), &({})) {{ \n", target, vv));
+        }
+        let mut lb = locals.clone();
+        for x in body {
+            s.push_str(&emit(x, &mut lb)?);
+        }
+    }
+    if els.is_empty() {
+        s.push_str("} \n");
+    } else {
+        s.push_str("} else { \n");
+        let mut lb = locals.clone();
+        for x in els {
+            s.push_str(&emit(x, &mut lb)?);
+        }
+        s.push_str("} \n");
+    }
+    Ok(s)
 }
 
 pub fn native_build(src_path: &str, out_path: &str) -> Result<(), ClangError> {

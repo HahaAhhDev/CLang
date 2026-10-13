@@ -1,0 +1,45 @@
+# flow shows the newer control words in one place
+var:nums = range(1, 6)
+
+fn::big(r) {
+  return(r > 3)
+}
+
+fn::dbl(r) {
+  return(r * 2)
+}
+
+fn::boot() {
+  var:i = 0
+  loop(both(i < 10, true)) {
+    var:i = i + 1
+    if(i % 2 == 0) {
+      skip
+    }
+    if(i > 5) {
+      stop
+    }
+    emit(pick(i == 1, "first", f"got {i}"))
+  }
+  var:hot = keep(nums, "big")
+  emit(conv(hot, "dbl"))
+  var:[a, b] = [70, 7]
+  emit(fdiv(a, b))
+  select(b) {
+    is(7) {
+      emit("seven")
+    }
+    else {
+      emit("other")
+    }
+  }
+  safe {
+    emit(missing)
+  } else {
+    emit(f"lived: {why()}")
+  }
+  emit(soft(nums[99]))
+  emit(f"bits {band(6, 3)} {size_of(nums)}")
+}
+
+run(boot)

@@ -6,6 +6,8 @@ use crate::value::Value;
 enum Signal {
     None,
     Return(Value),
+    Stop,
+    Skip,
 }
 
 pub struct Interp {
@@ -15,6 +17,8 @@ pub struct Interp {
     pub quiet: bool,
     pub trace: bool,
     pub trace_log: Vec<String>,
+    last_err: Option<String>,
+    loop_depth: usize,
     rng: u64,
     cli: Vec<String>,
 }
@@ -28,6 +32,8 @@ impl Interp {
             quiet: false,
             trace: false,
             trace_log: Vec::new(),
+            last_err: None,
+            loop_depth: 0,
             rng: 0x12345678,
             cli: Vec::new(),
         }
@@ -158,6 +164,16 @@ impl Interp {
                 "return outside a function".to_string(),
                 "move return inside fn::name { ... }".to_string(),
             )),
+            Signal::Stop => Err(ClangError::new(
+                1,
+                "stop sits outside any loop".to_string(),
+                "use stop only inside loop(c) { ... }".to_string(),
+            )),
+            Signal::Skip => Err(ClangError::new(
+                1,
+                "skip sits outside any loop".to_string(),
+                "use skip only inside loop(c) { ... }".to_string(),
+            )),
         }
     }
 
@@ -165,7 +181,7 @@ impl Interp {
         for s in stmts {
             match self.exec_stmt(s)? {
                 Signal::None => {}
-                r @ Signal::Return(_) => return Ok(r),
+                r @ (Signal::Return(_) | Signal::Stop | Signal::Skip) => return Ok(r),
             }
         }
         Ok(Signal::None)
@@ -227,6 +243,7 @@ impl Interp {
                 match sig {
                     Signal::None => Ok(Signal::None),
                     Signal::Return(_) => Ok(Signal::None),
+                    Signal::Stop | Signal::Skip => Ok(sig),
                 }
             }
             Stmt::If(cond, then_b, else_b, _) => {
@@ -263,13 +280,132 @@ impl Interp {
                         Signal::None => {
                             self.scopes.pop();
                         }
-                        r @ Signal::Return(_) => {
+                        r @ (Signal::Return(_) | Signal::Stop | Signal::Skip) => {
                             self.scopes.pop();
                             return Ok(r);
                         }
                     }
                 }
                 Ok(Signal::None)
+            }
+            Stmt::Loop(cond, body, line) => {
+                let _ = line;
+                loop {
+                    let c = self.eval(cond)?;
+                    if !c.is_truthy() {
+                        break;
+                    }
+                    self.loop_depth += 1;
+                    self.scopes.push(HashMap::new());
+                    match self.exec_block(body) {
+                        Ok(Signal::None) => {
+                            self.scopes.pop();
+                            self.loop_depth -= 1;
+                        }
+                        Ok(Signal::Return(v)) => {
+                            self.scopes.pop();
+                            self.loop_depth -= 1;
+                            return Ok(Signal::Return(v));
+                        }
+                        Ok(Signal::Stop) => {
+                            self.scopes.pop();
+                            self.loop_depth -= 1;
+                            break;
+                        }
+                        Ok(Signal::Skip) => {
+                            self.scopes.pop();
+                            self.loop_depth -= 1;
+                        }
+                        Err(e) => {
+                            self.scopes.pop();
+                            self.loop_depth -= 1;
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Signal::None)
+            }
+            Stmt::Stop(line) => {
+                if self.loop_depth == 0 {
+                    return Err(ClangError::new(
+                        *line,
+                        "stop sits outside any loop".to_string(),
+                        "use stop only inside loop(c) { ... }".to_string(),
+                    ));
+                }
+                Ok(Signal::Stop)
+            }
+            Stmt::Skip(line) => {
+                if self.loop_depth == 0 {
+                    return Err(ClangError::new(
+                        *line,
+                        "skip sits outside any loop".to_string(),
+                        "use skip only inside loop(c) { ... }".to_string(),
+                    ));
+                }
+                Ok(Signal::Skip)
+            }
+            Stmt::Safe(then_b, else_b, _) => {
+                self.scopes.push(HashMap::new());
+                match self.exec_block(then_b) {
+                    Ok(sig) => {
+                        self.scopes.pop();
+                        Ok(sig)
+                    }
+                    Err(e) => {
+                        self.scopes.pop();
+                        self.last_err = Some(e.msg.clone());
+                        self.scopes.push(HashMap::new());
+                        let r = self.exec_block(else_b)?;
+                        self.scopes.pop();
+                        Ok(r)
+                    }
+                }
+            }
+            Stmt::Select(on, arms, else_b, line) => {
+                let _ = line;
+                let target = self.eval(on)?;
+                for (v, body) in arms {
+                    if values_equal(&target, &self.eval(v)?) {
+                        self.scopes.push(HashMap::new());
+                        let r = self.exec_block(body)?;
+                        self.scopes.pop();
+                        return Ok(r);
+                    }
+                }
+                self.scopes.push(HashMap::new());
+                let r = self.exec_block(else_b)?;
+                self.scopes.pop();
+                Ok(r)
+            }
+            Stmt::Unpack(names, e, line) => {
+                let v = self.eval(e)?;
+                match v {
+                    Value::List(items) => {
+                        if items.len() != names.len() {
+                            return Err(ClangError::new(
+                                *line,
+                                format!(
+                                    "unpack wants {} values but got {}",
+                                    names.len(),
+                                    items.len()
+                                ),
+                                "match the names to the list length".to_string(),
+                            ));
+                        }
+                        for (n, item) in names.iter().zip(items) {
+                            if !self.set_existing(n, item.clone()) {
+                                self.set(n, item);
+                            }
+                        }
+                        Ok(Signal::None)
+                    }
+                    other => Err(ClangError::new(
+                        *line,
+                        format!("unpack needs a list, got {}", other.type_name()),
+                        "write var:[a, b] = pair".to_string(),
+                    )),
+                }
             }
             Stmt::FuncDef(..) => Ok(Signal::None),
         }
@@ -473,6 +609,42 @@ impl Interp {
                 }
             }
             Expr::BinOp(l, op, r, line) => self.eval_bin(l, op, r, *line),
+            Expr::Both(a, b, _) => {
+                if self.eval(a)?.is_truthy() {
+                    Ok(Value::Bool(self.eval(b)?.is_truthy()))
+                } else {
+                    Ok(Value::Bool(false))
+                }
+            }
+            Expr::Either(a, b, _) => {
+                if self.eval(a)?.is_truthy() {
+                    Ok(Value::Bool(true))
+                } else {
+                    Ok(Value::Bool(self.eval(b)?.is_truthy()))
+                }
+            }
+            Expr::Flip(x, _) => Ok(Value::Bool(!self.eval(x)?.is_truthy())),
+            Expr::Pick(c, a, b, _) => {
+                if self.eval(c)?.is_truthy() {
+                    self.eval(a)
+                } else {
+                    self.eval(b)
+                }
+            }
+            Expr::Soft(x, _) => match self.eval(x) {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    if e.msg.starts_with("missing ")
+                        || e.msg.contains("past the ")
+                        || e.msg.contains("has no field")
+                        || e.msg.contains("no field")
+                    {
+                        Ok(Value::Null)
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
             Expr::Neg(inner, _) => match self.eval(inner)? {
                 Value::Num(n) => Ok(Value::Num(-n)),
                 other => Err(ClangError::new(
@@ -547,6 +719,19 @@ impl Interp {
                     line,
                     format!("cannot divide {} and {}", x.type_name(), y.type_name()),
                     "use / only on numbers".to_string(),
+                )),
+            },
+            Op::Mod => match (a, b) {
+                (Value::Num(_), Value::Num(y)) if y == 0.0 => Err(ClangError::new(
+                    line,
+                    "modulo by zero".to_string(),
+                    "guard with if(b == 0) before mod".to_string(),
+                )),
+                (Value::Num(x), Value::Num(y)) => Ok(Value::Num(x % y)),
+                (x, y) => Err(ClangError::new(
+                    line,
+                    format!("cannot mod {} and {}", x.type_name(), y.type_name()),
+                    "use % only on numbers".to_string(),
                 )),
             },
             Op::Eq => Ok(Value::Bool(values_equal(&a, &b))),
@@ -671,6 +856,16 @@ impl Interp {
             match sig {
                 Signal::None => Ok(Value::Null),
                 Signal::Return(v) => Ok(v),
+                Signal::Stop => Err(ClangError::new(
+                    line,
+                    "stop cannot cross a call".to_string(),
+                    "keep stop inside the loop body".to_string(),
+                )),
+                Signal::Skip => Err(ClangError::new(
+                    line,
+                    "skip cannot cross a call".to_string(),
+                    "keep skip inside the loop body".to_string(),
+                )),
             }
         } else {
             self.eval_builtin(name, args, line)
@@ -1046,7 +1241,9 @@ impl Interp {
                                 match w.exec_block(&bd) {
                                     Ok(Signal::None) => Value::Null,
                                     Ok(Signal::Return(r)) => r,
-                                    Err(_) => Value::Null,
+                                    Ok(Signal::Stop) | Ok(Signal::Skip) | Err(_) => {
+                                        Value::Null
+                                    }
                                 }
                             }));
                         }
@@ -1551,6 +1748,212 @@ impl Interp {
                 }
                 Ok(Value::Null)
             }
+            "why" => {
+                need_args(name, args, 0, line)?;
+                Ok(Value::Str(self.last_err.clone().unwrap_or_default()))
+            }
+            "keep" => {
+                need_args(name, args, 2, line)?;
+                let items = self.eval(&args[0])?;
+                let fname = self.eval(&args[1])?;
+                match (items, fname) {
+                    (Value::List(v), Value::Str(f)) => {
+                        let (ps, body, _) = self.funcs.get(&f).cloned().ok_or_else(|| {
+                            ClangError::new(
+                                line,
+                                format!("unknown function '{}'", f),
+                                "define it with fn::name(r) { ... }".to_string(),
+                            )
+                        })?;
+                        if ps.len() != 1 {
+                            return Err(ClangError::new(
+                                line,
+                                format!("keep needs a one input function, '{}' takes {}", f, ps.len()),
+                                "write fn::name(r) { ... }".to_string(),
+                            ));
+                        }
+                        let mut out = Vec::new();
+                        for item in v {
+                            self.scopes.push(HashMap::new());
+                            self.set(&ps[0], item.clone());
+                            let keep_it = match self.exec_block(&body)? {
+                                Signal::Return(r) => r.is_truthy(),
+                                Signal::None => false,
+                                Signal::Stop | Signal::Skip => {
+                                    self.scopes.pop();
+                                    return Err(ClangError::new(
+                                        line,
+                                        "stop cannot cross a call".to_string(),
+                                        "keep stop inside the loop body".to_string(),
+                                    ));
+                                }
+                            };
+                            self.scopes.pop();
+                            if keep_it {
+                                out.push(item);
+                            }
+                        }
+                        Ok(Value::List(out))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "keep needs (list, fn name)".to_string(),
+                        "call keep([1, 2], \"good\")".to_string(),
+                    )),
+                }
+            }
+            "conv" => {
+                need_args(name, args, 2, line)?;
+                let items = self.eval(&args[0])?;
+                let fname = self.eval(&args[1])?;
+                match (items, fname) {
+                    (Value::List(v), Value::Str(f)) => {
+                        let (ps, body, _) = self.funcs.get(&f).cloned().ok_or_else(|| {
+                            ClangError::new(
+                                line,
+                                format!("unknown function '{}'", f),
+                                "define it with fn::name(r) { ... }".to_string(),
+                            )
+                        })?;
+                        if ps.len() != 1 {
+                            return Err(ClangError::new(
+                                line,
+                                format!("conv needs a one input function, '{}' takes {}", f, ps.len()),
+                                "write fn::name(r) { ... }".to_string(),
+                            ));
+                        }
+                        let mut out = Vec::new();
+                        for item in v {
+                            self.scopes.push(HashMap::new());
+                            self.set(&ps[0], item);
+                            let mapped = match self.exec_block(&body)? {
+                                Signal::Return(r) => r,
+                                Signal::None => Value::Null,
+                                Signal::Stop | Signal::Skip => {
+                                    self.scopes.pop();
+                                    return Err(ClangError::new(
+                                        line,
+                                        "stop cannot cross a call".to_string(),
+                                        "keep stop inside the loop body".to_string(),
+                                    ));
+                                }
+                            };
+                            self.scopes.pop();
+                            out.push(mapped);
+                        }
+                        Ok(Value::List(out))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "conv needs (list, fn name)".to_string(),
+                        "call conv([1, 2], \"dbl\")".to_string(),
+                    )),
+                }
+            }
+            "fdiv" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(_), Value::Num(y)) if y == 0.0 => Err(ClangError::new(
+                        line,
+                        "division by zero".to_string(),
+                        "guard with if(b == 0) before dividing".to_string(),
+                    )),
+                    (Value::Num(x), Value::Num(y)) => Ok(Value::Num((x / y).floor())),
+                    _ => Err(ClangError::new(
+                        line,
+                        "fdiv needs two numbers".to_string(),
+                        "call fdiv(7, 2)".to_string(),
+                    )),
+                }
+            }
+            "size_of" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Str(s) => Ok(Value::Num(s.len() as f64)),
+                    Value::List(v) => Ok(Value::Num(v.len() as f64)),
+                    Value::Map(m) => Ok(Value::Num(m.len() as f64)),
+                    Value::Num(_) => Ok(Value::Num(8.0)),
+                    Value::Bool(_) => Ok(Value::Num(1.0)),
+                    Value::Null => Ok(Value::Num(0.0)),
+                }
+            }
+            "band" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => Ok(Value::Num(((a as i64) & (b as i64)) as f64)),
+                    _ => Err(ClangError::new(
+                        line,
+                        "band needs two numbers".to_string(),
+                        "call band(6, 3)".to_string(),
+                    )),
+                }
+            }
+            "bor" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => Ok(Value::Num(((a as i64) | (b as i64)) as f64)),
+                    _ => Err(ClangError::new(
+                        line,
+                        "bor needs two numbers".to_string(),
+                        "call bor(6, 3)".to_string(),
+                    )),
+                }
+            }
+            "bxor" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => Ok(Value::Num(((a as i64) ^ (b as i64)) as f64)),
+                    _ => Err(ClangError::new(
+                        line,
+                        "bxor needs two numbers".to_string(),
+                        "call bxor(6, 3)".to_string(),
+                    )),
+                }
+            }
+            "bnot" => {
+                need_args(name, args, 1, line)?;
+                match self.eval(&args[0])? {
+                    Value::Num(a) => Ok(Value::Num(!(a as i64) as f64)),
+                    other => Err(ClangError::new(
+                        line,
+                        format!("bnot needs a number, got {}", other.type_name()),
+                        "call bnot(6)".to_string(),
+                    )),
+                }
+            }
+            "range" => {
+                need_args(name, args, 2, line)?;
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Num(a), Value::Num(b)) => {
+                        let (mut lo, mut hi) = (a as i64, b as i64);
+                        if (hi - lo).abs() > 100000 {
+                            return Err(ClangError::new(
+                                line,
+                                "range is too wide".to_string(),
+                                "keep it under 100000 items".to_string(),
+                            ));
+                        }
+                        let mut out = Vec::new();
+                        if lo <= hi {
+                            while lo < hi {
+                                out.push(Value::Num(lo as f64));
+                                lo += 1;
+                            }
+                        } else {
+                            while lo > hi {
+                                out.push(Value::Num(lo as f64));
+                                lo -= 1;
+                            }
+                        }
+                        Ok(Value::List(out))
+                    }
+                    _ => Err(ClangError::new(
+                        line,
+                        "range needs (start, end)".to_string(),
+                        "call range(0, 5)".to_string(),
+                    )),
+                }
+            }
             "str" => {
                 need_args(name, args, 1, line)?;
                 Ok(Value::Str(self.eval(&args[0])?.display()))
@@ -1838,6 +2241,9 @@ fn serve_blocking(
         let ret = match w.exec_block(&body_stmts) {
             Ok(Signal::None) => Value::Null,
             Ok(Signal::Return(v)) => v,
+            Ok(Signal::Stop) | Ok(Signal::Skip) => {
+                Value::Str("loop control crossed a call".to_string())
+            }
             Err(_) => Value::Str("handler failed".to_string()),
         };
         let (code, text) = match ret {
@@ -1975,6 +2381,12 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         Stmt::Run(..) => "run",
         Stmt::If(..) => "if",
         Stmt::For(..) => "for",
+        Stmt::Loop(..) => "loop",
+        Stmt::Stop(..) => "stop",
+        Stmt::Skip(..) => "skip",
+        Stmt::Safe(..) => "safe",
+        Stmt::Select(..) => "select",
+        Stmt::Unpack(..) => "unpack",
         Stmt::FuncDef(..) => "def",
     }
 }
@@ -1988,6 +2400,12 @@ fn stmt_line(s: &Stmt) -> usize {
         | Stmt::Run(_, l)
         | Stmt::If(_, _, _, l)
         | Stmt::For(_, _, _, l)
+        | Stmt::Loop(_, _, l)
+        | Stmt::Stop(l)
+        | Stmt::Skip(l)
+        | Stmt::Safe(_, _, l)
+        | Stmt::Select(_, _, _, l)
+        | Stmt::Unpack(_, _, l)
         | Stmt::FuncDef(_, _, _, l) => *l,
     }
 }
@@ -2535,5 +2953,113 @@ mod stack7_red {
         ip.run_source("var:x = 1\nemit(x)\n").expect("runs");
         assert!(ip.trace_log.len() >= 2, "got {:?}", ip.trace_log);
         assert!(ip.trace_log.iter().all(|l| l.contains(':')));
+    }
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::Interp;
+
+    fn run_ok(src: &str) -> Vec<String> {
+        let mut ip = Interp::new();
+        ip.run_source(src).expect("program should run");
+        ip.printed.clone()
+    }
+
+    fn run_err(src: &str) -> String {
+        let mut ip = Interp::new();
+        ip.run_source(src).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn logic_words_short_circuit() {
+        let out = run_ok("emit(both(true, true))\nemit(both(true, false))\nemit(either(false, true))\nemit(flip(false))\n");
+        assert_eq!(out, vec!["true", "false", "true", "true"]);
+    }
+
+    #[test]
+    fn both_skips_bad_side() {
+        let out = run_ok("emit(both(false, missing))\nemit(either(true, missing))\n");
+        assert_eq!(out, vec!["false", "true"]);
+    }
+
+    #[test]
+    fn mod_and_fdiv() {
+        let out = run_ok("emit(7 % 3)\nemit(fdiv(7, 2))\nemit(band(6, 3))\nemit(bor(6, 3))\nemit(bxor(6, 3))\nemit(bnot(6))\n");
+        assert_eq!(out, vec!["1", "3", "2", "7", "5", "-7"]);
+    }
+
+    #[test]
+    fn loop_stop_skip() {
+        let src = "var:i = 0\nloop(true) {\n var:i = i + 1\n if(i == 2) {\n skip\n }\n if(i > 3) {\n stop\n }\n emit(i)\n}\nemit(f\"done {i}\")\n";
+        let out = run_ok(src);
+        assert_eq!(out, vec!["1", "3", "done 4"]);
+    }
+
+    #[test]
+    fn stop_outside_errors() {
+        let e = run_err("stop\n");
+        assert!(e.contains("outside any loop"), "got {}", e);
+    }
+
+    #[test]
+    fn safe_catches_with_why() {
+        let src = "safe {\n emit(missing)\n} else {\n emit(f\"caught {why()}\")\n}\nemit(\"after\")\n";
+        let out = run_ok(src);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].starts_with("caught "));
+        assert_eq!(out[1], "after");
+    }
+
+    #[test]
+    fn safe_passes_clean_through() {
+        let out = run_ok("safe {\n emit(\"fine\")\n} else {\n emit(\"bad\")\n}\n");
+        assert_eq!(out, vec!["fine"]);
+    }
+
+    #[test]
+    fn pick_is_lazy() {
+        let out = run_ok("emit(pick(true, 1, missing))\nemit(pick(false, missing, 2))\n");
+        assert_eq!(out, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn keep_and_conv() {
+        let src = "fn::big(r) {\n return(r > 2)\n}\nfn::dbl(r) {\n return(r * 2)\n}\nvar:ks = keep([1, 2, 3], \"big\")\nemit(ks)\nemit(conv([1, 2], \"dbl\"))\n";
+        let out = run_ok(src);
+        assert_eq!(out, vec!["[3]", "[2, 4]"]);
+    }
+
+    #[test]
+    fn unpack_binds() {
+        let out = run_ok("var:[a, b] = [10, 20]\nemit(f\"{a} {b}\")\n");
+        assert_eq!(out, vec!["10 20"]);
+    }
+
+    #[test]
+    fn unpack_arity_errors() {
+        let e = run_err("var:[a, b] = [1]\n");
+        assert!(e.contains("wants 2 values but got 1"), "got {}", e);
+    }
+
+    #[test]
+    fn select_picks_arm() {
+        let src = "var:x = 2\nselect(x) {\n is(1) {\n emit(\"one\")\n }\n is(2) {\n emit(\"two\")\n }\n else {\n emit(\"other\")\n }\n}\n";
+        assert_eq!(run_ok(src), vec!["two"]);
+        let src2 = "select(9) {\n is(1) {\n emit(\"one\")\n }\n else {\n emit(\"other\")\n }\n}\n";
+        assert_eq!(run_ok(src2), vec!["other"]);
+    }
+
+    #[test]
+    fn size_of_and_range() {
+        let out = run_ok("emit(size_of(\"hey\"))\nemit(range(0, 3))\nemit(range(3, 0))\n");
+        assert_eq!(out, vec!["3", "[0, 1, 2]", "[3, 2, 1]"]);
+    }
+
+    #[test]
+    fn soft_nulls_missing() {
+        let src = "var:u = json_parse(\"{\\\"a\\\": 1}\")\nemit(soft(u.zzz))\nemit(soft(u.a))\n";
+        let out = run_ok(src);
+        assert_eq!(out, vec!["null", "1"]);
     }
 }
