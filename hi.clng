@@ -1,0 +1,8 @@
+var:main = "hello"
+
+fn::print(text) {
+  emit(text)
+  return(text)
+}
+
+print(main)

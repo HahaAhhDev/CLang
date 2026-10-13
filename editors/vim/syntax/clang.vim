@@ -5,8 +5,8 @@ endif
 syn match clangComment "#.*$"
 syn match clangVar "var:[A-Za-z_][A-Za-z0-9_]*"
 syn match clangFuncDef "fn::[A-Za-z_][A-Za-z0-9_]*"
-syn match clangKeyword "\<\(if\|else\|for\|in\|return\|run\)\>"
-syn match clangBuiltin "\<\(emit\|cap_first\|lower\|upper\|contains\|len\|split\|join\|trim\|replace\|starts_with\|ends_with\|file_read\|file_write\|json_parse\|json_dump\|http_get\|http_post\|http_serve\|db_put\|db_get\|db_list\|tbl_put\|tbl_get\|tbl_list\|tbl_del\|pmap\|exec\|env\|cli_args\|time_now\|sleep_ms\|rand_seed\|rand_int\|sort\|push\|mk_user\)\>"
+syn match clangKeyword "\<\(if\|else\|for\|in\|return\|run\|loop\|stop\|skip\|safe\|select\|is\)\>"
+syn match clangBuiltin "\<\(emit\|cap_first\|lower\|upper\|contains\|len\|split\|join\|trim\|replace\|starts_with\|ends_with\|file_read\|file_write\|json_parse\|json_dump\|http_get\|http_post\|http_serve\|db_put\|db_get\|db_list\|tbl_put\|tbl_get\|tbl_list\|tbl_del\|pmap\|both\|either\|flip\|pick\|soft\|keep\|conv\|why\|fdiv\|size_of\|band\|bor\|bxor\|bnot\|range\|exec\|env\|cli_args\|time_now\|sleep_ms\|rand_seed\|rand_int\|sort\|push\|mk_user\)\>"
 syn region clangString start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=clangInterp
 syn match clangInterp "{\[^}]\\+}" contained
 syn match clangNumber "\<[0-9]\+\(\.[0-9]\+\)\?\>"
