@@ -1,5 +1,7 @@
 # CLang
 
+![CLang logo](assets/clang-logo.svg)
+
 Small language that looks dense on screen but reads line by line. One way to store, one way to define, one verb to print.
 
 ## Syntax (locked v1)
@@ -58,6 +60,7 @@ Runs pick a bytecode VM for pure code and fall back to the tree walk for IO, sam
 
 - `src/` lexer parser runtime compiler
 - `examples/` hello calculator contacts vault
+- `editors/` micro plus nano coloring, VSCode grammar plus snippets plus logo
 - `tools/secular` license check
 - `.github/workflows/ci.yml` test plus build plus secular
 

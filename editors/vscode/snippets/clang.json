@@ -1,0 +1,27 @@
+{
+  "Variable": {
+    "prefix": "var",
+    "body": ["var:${1:name} = ${2:value}"],
+    "description": "Store a value with the one universal starter"
+  },
+  "Function one input": {
+    "prefix": "fn1",
+    "body": ["fn::${1:name}(${2:r}) {", "  ${3:body}", "  return(${4:out})", "}"],
+    "description": "Define a one input function"
+  },
+  "Function several inputs": {
+    "prefix": "fn2",
+    "body": ["fn::${1:name}[${2:a}, ${3:b}] {", "  ${4:body}", "  return(${5:out})", "}"],
+    "description": "Define a multi input function"
+  },
+  "Print": {
+    "prefix": "emit",
+    "body": ["emit(${1:value})"],
+    "description": "Print values, f and r string modes included"
+  },
+  "Test": {
+    "prefix": "test",
+    "body": ["fn::test_${1:name}() {", "  assert(${2:check}, \"${3:why}\")", "}"],
+    "description": "A test case for clng test"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "clang",
+  "displayName": "CLang",
+  "description": "Syntax coloring plus snippets for the CLang language (.clng files)",
+  "version": "0.6.0",
+  "publisher": "hahaahhdev",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HahaAhhDev/CLang"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "keywords": ["clang", "language", "interpreter"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "clang",
+        "aliases": ["CLang", "clang"],
+        "extensions": [".clng"],
+        "configuration": "./language-configuration.json",
+        "icon": { "light": "./images/icon.png", "dark": "./images/icon.png" }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "clang",
+        "scopeName": "source.clang",
+        "path": "./syntaxes/clang.tmGrammar.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "clang",
+        "path": "./snippets/clang.json"
+      }
+    ]
+  }
+}
